@@ -1,0 +1,13 @@
+// Example Waybar module configuration for Nixe Weather.
+// Add "custom/weather" to modules-right (or modules-center) in ~/.config/waybar/config.jsonc
+// and include the block below.
+{
+  "custom/weather": {
+    "exec": "nixe-weather --waybar",
+    "return-type": "json",
+    "interval": 900,
+    "on-click": "nixe-weather --toggle",
+    "on-click-right": "nixe-weather --section settings",
+    "tooltip": true
+  }
+}

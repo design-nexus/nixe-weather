@@ -1,0 +1,383 @@
+/* Weather stylesheet — loaded after nixe-theme's base.css.
+ * Uses semantic @theme_* tokens and @weather_* palette colors so every
+ * color adapts live when the Omarchy or Nixe theme changes. */
+
+/* ---------- Semantic condition & metric icon colors ---------- */
+
+.cond-sun {
+  color: @weather_sun;
+}
+
+.cond-warm {
+  color: @weather_warm;
+}
+
+.cond-rain {
+  color: @weather_rain;
+}
+
+.cond-wind {
+  color: @weather_wind;
+}
+
+.cond-uv {
+  color: @weather_uv;
+}
+
+.cond-cold {
+  color: @weather_cold;
+}
+
+.cond-cloud {
+  color: mix(@theme_accent, @theme_text, 0.45);
+}
+
+/* ---------- Colored status & severity pills ---------- */
+
+.tag.good {
+  background: alpha(@weather_wind, 0.16);
+  color: @weather_wind;
+  border: 1px solid alpha(@weather_wind, 0.34);
+}
+
+.tag.moderate {
+  background: alpha(@weather_sun, 0.16);
+  color: @weather_sun;
+  border: 1px solid alpha(@weather_sun, 0.34);
+}
+
+.tag.elevated {
+  background: alpha(@weather_warm, 0.16);
+  color: @weather_warm;
+  border: 1px solid alpha(@weather_warm, 0.34);
+}
+
+.tag.uv {
+  background: alpha(@weather_uv, 0.16);
+  color: @weather_uv;
+  border: 1px solid alpha(@weather_uv, 0.34);
+}
+
+.tag.rain {
+  background: alpha(@weather_rain, 0.16);
+  color: @weather_rain;
+  border: 1px solid alpha(@weather_rain, 0.34);
+}
+
+/* ---------- Severe weather alert banner ---------- */
+
+.alert-banner {
+  border: 1px solid alpha(@theme_danger, 0.52);
+  background: linear-gradient(90deg, alpha(@theme_danger, 0.16), alpha(@weather_warm, 0.08));
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+
+.alert-title {
+  font-weight: 700;
+  color: @theme_danger;
+  letter-spacing: 0.5px;
+}
+
+.alert-headline {
+  font-weight: 600;
+  color: @theme_text;
+}
+
+.alert-body {
+  font-size: 0.88em;
+  color: @theme_dim_text;
+}
+
+/* ---------- Current conditions hero ---------- */
+
+.hero-card {
+  border: 1px solid alpha(@theme_accent, 0.28);
+  background: linear-gradient(
+    135deg,
+    alpha(@theme_accent, 0.11),
+    alpha(@weather_rain, 0.05) 55%,
+    alpha(@weather_sun, 0.07)
+  );
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 6px;
+}
+
+.hero-location {
+  font-size: 1.25em;
+  font-weight: 700;
+  color: @theme_text;
+}
+
+.hero-subtitle {
+  font-size: 0.88em;
+  color: @theme_dim_text;
+}
+
+.hero-temp {
+  font-size: 2.85em;
+  font-weight: 700;
+  color: @theme_text;
+  font-feature-settings: "tnum";
+}
+
+.hero-condition {
+  font-size: 1.06em;
+  font-weight: 600;
+  color: @theme_accent;
+}
+
+.hero-meta {
+  font-size: 0.9em;
+  color: @theme_dim_text;
+  font-feature-settings: "tnum";
+}
+
+.hero-high {
+  font-size: 0.9em;
+  font-weight: 600;
+  color: @weather_warm;
+  font-feature-settings: "tnum";
+}
+
+.hero-low {
+  font-size: 0.9em;
+  font-weight: 600;
+  color: @weather_cold;
+  font-feature-settings: "tnum";
+}
+
+.hero-quick-strip {
+  padding-top: 10px;
+  border-top: 1px solid alpha(@theme_accent, 0.18);
+}
+
+.hero-stat {
+  font-size: 0.86em;
+  color: @theme_text;
+  font-feature-settings: "tnum";
+}
+
+.hero-stat-wind {
+  color: @weather_wind;
+}
+
+.hero-stat-rain {
+  color: @weather_rain;
+}
+
+.hero-stat-uv {
+  color: @weather_sun;
+}
+
+.hero-stat-pressure {
+  color: @weather_uv;
+}
+
+/* ---------- 24-hour forecast strip ---------- */
+
+.hourly-scroller {
+  min-height: 114px;
+}
+
+.hourly-cell {
+  min-width: 64px;
+  padding: 12px 10px;
+  border-left: 1px solid @divider;
+}
+
+.hourly-cell.now {
+  border-left: none;
+  background: alpha(@theme_accent, 0.10);
+  border-bottom: 2px solid @theme_accent;
+}
+
+.hourly-time {
+  font-size: 0.82em;
+  color: @theme_dim_text;
+  font-feature-settings: "tnum";
+}
+
+.hourly-cell.now .hourly-time {
+  color: @theme_accent;
+  font-weight: 700;
+}
+
+.hourly-pop {
+  font-size: 0.78em;
+  font-weight: 600;
+  color: @weather_rain;
+  font-feature-settings: "tnum";
+  min-height: 15px;
+}
+
+.hourly-temp {
+  font-size: 0.94em;
+  font-weight: 600;
+  color: @theme_text;
+  font-feature-settings: "tnum";
+}
+
+/* ---------- 7-day & 10-day forecast ---------- */
+
+.daily-row {
+  padding: 10px 16px;
+  min-height: 44px;
+  border-top: 1px solid @divider;
+}
+
+.daily-row:first-child {
+  border-top: none;
+}
+
+.daily-day {
+  font-weight: 600;
+  color: @theme_text;
+}
+
+.daily-pop {
+  font-size: 0.84em;
+  font-weight: 600;
+  color: @weather_rain;
+  font-feature-settings: "tnum";
+}
+
+.daily-min {
+  font-size: 0.92em;
+  font-weight: 600;
+  color: @weather_cold;
+  font-feature-settings: "tnum";
+}
+
+.daily-max {
+  font-size: 0.92em;
+  font-weight: 700;
+  color: @weather_warm;
+  font-feature-settings: "tnum";
+}
+
+.temp-range-track {
+  background: alpha(@theme_muted, 0.32);
+  border-radius: 4px;
+  min-height: 6px;
+}
+
+.temp-range-fill {
+  background: linear-gradient(90deg, @weather_cold, @theme_accent 50%, @weather_warm);
+  border-radius: 4px;
+  min-height: 6px;
+}
+
+/* ---------- Expandable details ---------- */
+
+.detail-expand-row {
+  border-top: 1px solid @divider;
+}
+
+.detail-expand-row:first-child {
+  border-top: none;
+}
+
+.detail-expand-header {
+  min-height: 48px;
+  padding: 10px 18px;
+}
+
+.detail-expand-header:hover {
+  background: @row_hover;
+}
+
+.detail-title {
+  font-weight: 600;
+  color: @theme_text;
+}
+
+.detail-summary {
+  font-feature-settings: "tnum";
+  font-weight: 600;
+  color: @theme_accent;
+}
+
+.detail-expand-body {
+  padding: 10px 18px 14px 44px;
+  border-top: 1px solid @divider;
+  background: alpha(@theme_surface, 0.45);
+  font-size: 0.88em;
+}
+
+/* ---------- Radar & Overlays ---------- */
+
+.settings-page.page-radar {
+  padding-left: 14px;
+  padding-right: 14px;
+}
+
+.radar-toolbar {
+  padding: 10px 16px;
+  border-bottom: 1px solid @divider;
+}
+
+.radar-canvas {
+  margin: 0;
+}
+
+.radar-timeline-row {
+  padding: 10px 16px 12px;
+  border-top: 1px solid @divider;
+}
+
+/* ---------- Moon & Astronomy ---------- */
+
+.moon-hero-row {
+  padding: 14px 18px;
+  background: linear-gradient(135deg, alpha(@weather_uv, 0.08), alpha(@weather_sun, 0.05));
+}
+
+/* ---------- Location search strip & results ---------- */
+
+.search-results-panel {
+  padding: 8px 16px 10px;
+  border-bottom: 1px solid @hairline;
+  background: @theme_bg;
+}
+
+.search-result-row {
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.search-result-row:hover {
+  background: @row_hover;
+}
+
+/* ---------- Saved locations in sidebar ---------- */
+
+.nav-loc-badge {
+  font-size: 0.82em;
+  font-weight: 600;
+  color: @theme_accent;
+  font-feature-settings: "tnum";
+}
+
+/* ---------- Compact Settings dialog for 460×720 floating mode ---------- */
+
+.settings-dialog.compact .settings-dialog-side {
+  min-width: 124px;
+  padding: 12px 6px;
+}
+
+.settings-dialog.compact .dialog-nav-summary {
+  font-size: 0.75em;
+}
+
+.settings-dialog.compact .dialog-head {
+  padding: 0 10px 0 14px;
+  min-height: 48px;
+}
+
+.settings-dialog.compact .settings-dialog-main .settings-page {
+  padding: 12px 12px 20px;
+}
+

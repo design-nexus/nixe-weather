@@ -1,0 +1,151 @@
+//! All sidebar sections in Weather, plus shared date/time formatting helpers.
+
+pub mod air_quality;
+pub mod astronomy;
+pub mod daily;
+pub mod hourly;
+pub mod overview;
+pub mod radar;
+pub mod settings;
+
+use crate::widgets::Page;
+use chrono::{Datelike, NaiveDate, NaiveDateTime};
+use nixe_weather_core::ForecastSnapshot;
+
+pub struct Section {
+    pub id: &'static str,
+    pub group: &'static str,
+    pub title: &'static str,
+    pub icon: &'static str,
+    pub description: &'static str,
+    pub nav: bool,
+    pub build: fn(&Page, Option<&ForecastSnapshot>, bool, Option<&str>),
+}
+
+pub fn all() -> Vec<Section> {
+    vec![
+        Section {
+            id: "overview",
+            group: "Forecast",
+            title: "Overview",
+            icon: "weather-clear-symbolic",
+            description: "Current conditions, alerts, 24-hour strip and 7-day forecast",
+            nav: true,
+            build: overview::build,
+        },
+        Section {
+            id: "hourly",
+            group: "Forecast",
+            title: "Hourly & Graphs",
+            icon: "view-continuous-symbolic",
+            description: "48-hour temperature, precipitation, wind, pressure and radiation curves",
+            nav: true,
+            build: hourly::build,
+        },
+        Section {
+            id: "daily",
+            group: "Forecast",
+            title: "10-Day Outlook",
+            icon: "x-office-calendar-symbolic",
+            description: "Extended 10-day forecast with daily wind, UV, daylight and rain totals",
+            nav: true,
+            build: daily::build,
+        },
+        Section {
+            id: "radar",
+            group: "Maps & Radar",
+            title: "Radar & Overlays",
+            icon: "mark-location-symbolic",
+            description: "Live RainViewer Doppler radar, infrared satellite, wind streamlines and isobars",
+            nav: true,
+            build: radar::build,
+        },
+        Section {
+            id: "air-quality",
+            group: "Environment",
+            title: "Air Quality & Pollen",
+            icon: "weather-fog-symbolic",
+            description: "US & European AQI, PM2.5, PM10, ozone, NO₂, SO₂, CO, dust, UV and pollen",
+            nav: true,
+            build: air_quality::build,
+        },
+        Section {
+            id: "astronomy",
+            group: "Environment",
+            title: "Sun, Moon & Models",
+            icon: "weather-clear-night-symbolic",
+            description: "Solar elevation arc, lunar phase & illumination, and ECMWF / GFS / ICON models",
+            nav: true,
+            build: astronomy::build,
+        },
+    ]
+}
+
+pub fn format_clock_label(iso: &str, use_24h: bool) -> String {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M") {
+        if use_24h {
+            dt.format("%H:%M").to_string()
+        } else {
+            dt.format("%-I %p").to_string()
+        }
+    } else if let Some(hm) = iso.split('T').nth(1) {
+        hm.get(..5).unwrap_or(hm).to_string()
+    } else {
+        iso.to_string()
+    }
+}
+
+pub fn format_sun_time(iso: Option<&str>, use_24h: bool) -> String {
+    let Some(s) = iso else { return "–".into() };
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
+        if use_24h {
+            dt.format("%H:%M").to_string()
+        } else {
+            dt.format("%-I:%M %p").to_string()
+        }
+    } else {
+        s.to_string()
+    }
+}
+
+pub fn format_day_name(date_str: &str, idx: usize) -> String {
+    if idx == 0 {
+        return "Today".into();
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        match d.weekday() {
+            chrono::Weekday::Mon => "Mon".into(),
+            chrono::Weekday::Tue => "Tue".into(),
+            chrono::Weekday::Wed => "Wed".into(),
+            chrono::Weekday::Thu => "Thu".into(),
+            chrono::Weekday::Fri => "Fri".into(),
+            chrono::Weekday::Sat => "Sat".into(),
+            chrono::Weekday::Sun => "Sun".into(),
+        }
+    } else {
+        date_str.to_string()
+    }
+}
+
+pub fn format_day_full(date_str: &str, idx: usize) -> String {
+    if let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        let prefix = if idx == 0 {
+            "Today · ".to_string()
+        } else if idx == 1 {
+            "Tomorrow · ".to_string()
+        } else {
+            String::new()
+        };
+        format!("{prefix}{}", d.format("%a, %b %-d"))
+    } else {
+        date_str.to_string()
+    }
+}
+
+pub fn format_duration_secs(secs: Option<f64>) -> String {
+    let Some(s) = secs else { return "–".into() };
+    let total_mins = (s / 60.0).round() as i64;
+    let h = total_mins / 60;
+    let m = total_mins % 60;
+    format!("{h}h {m:02}m")
+}

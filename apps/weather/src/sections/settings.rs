@@ -1,0 +1,290 @@
+//! Settings page groups for Weather.
+
+use crate::widgets::{self, Page};
+use crate::{prefs, settings_dialog, theme, window};
+use gtk::glib;
+use gtk::prelude::*;
+use nixe_weather_core::{PrecipitationUnit, TemperatureUnit, WindSpeedUnit};
+
+fn apply_units(change: impl FnOnce(&mut prefs::Prefs)) {
+    prefs::update(change);
+    window::rerender_current();
+}
+
+pub fn build(page: &Page) {
+    let p = prefs::get();
+
+    // ----- Units & forecast -----
+    let g = page.group("Units & forecast");
+    g.add(&widgets::segmented_row(
+        "Temperature",
+        "Unit for current, hourly and daily temperatures.",
+        widgets::opts(&[("celsius", "°C"), ("fahrenheit", "°F")]),
+        p.temperature_unit.as_str(),
+        |v| apply_units(|p| p.temperature_unit = TemperatureUnit::from_id(&v)),
+    ));
+    g.add(&widgets::segmented_row(
+        "Wind speed",
+        "Unit for wind speed and gusts.",
+        widgets::opts(&[
+            ("kmh", "km/h"),
+            ("mph", "mph"),
+            ("ms", "m/s"),
+            ("knots", "kn"),
+        ]),
+        p.wind_speed_unit.as_str(),
+        |v| apply_units(|p| p.wind_speed_unit = WindSpeedUnit::from_id(&v)),
+    ));
+    g.add(&widgets::segmented_row(
+        "Precipitation",
+        "Unit for rain and snow totals.",
+        widgets::opts(&[("mm", "mm"), ("inch", "in")]),
+        p.precipitation_unit.as_str(),
+        |v| apply_units(|p| p.precipitation_unit = PrecipitationUnit::from_id(&v)),
+    ));
+    g.add(&widgets::segmented_row(
+        "Time format",
+        "Clock format for hourly forecasts and sunrise/sunset.",
+        widgets::opts(&[("12", "12-hour"), ("24", "24-hour")]),
+        if p.use_24h_time { "24" } else { "12" },
+        |v| apply_units(|p| p.use_24h_time = v == "24"),
+    ));
+    g.add(&widgets::segmented_row(
+        "Default map overlay",
+        "Initial overlay shown on the Radar & Overlays page.",
+        widgets::opts(&[
+            ("radar", "Radar"),
+            ("satellite", "Satellite"),
+            ("wind", "Wind"),
+            ("temp", "Temp"),
+        ]),
+        &p.default_radar_layer,
+        |v| apply_units(|p| p.default_radar_layer = v),
+    ));
+    g.add(&widgets::segmented_row(
+        "Refresh interval",
+        "How often forecasts refresh while open or polled by Waybar.",
+        widgets::opts(&[("15", "15 min"), ("30", "30 min"), ("60", "60 min")]),
+        &p.refresh_interval_mins.to_string(),
+        |v| {
+            prefs::update(|p| p.refresh_interval_mins = v.parse().unwrap_or(30));
+            window::restart_refresh_timer();
+        },
+    ));
+    let (r, _) = widgets::switch_row(
+        "US severe-weather alerts",
+        "Fetch active watches and warnings from NOAA / National Weather Service for US locations.",
+        p.us_noaa_alerts,
+        |on| {
+            prefs::update(|p| p.us_noaa_alerts = on);
+            window::refresh_active(true);
+        },
+    );
+    g.add(&r);
+
+    let (r, _) = widgets::switch_row(
+        "Commercial use mode",
+        "Open-Meteo's free hosted API is for non-commercial use only (CC BY 4.0). Enable this only with a commercial API key or self-hosted instance.",
+        p.commercial_use,
+        |on| {
+            prefs::update(|p| p.commercial_use = on);
+            window::refresh_active(true);
+        },
+    );
+    g.add(&r);
+
+    let api_key_entry = gtk::Entry::new();
+    api_key_entry.set_placeholder_text(Some("Optional commercial API key"));
+    api_key_entry.set_visibility(false);
+    api_key_entry.set_text(&p.open_meteo_api_key);
+    api_key_entry.set_width_chars(20);
+    api_key_entry.connect_changed(|e| {
+        let val = e.text().trim().to_string();
+        prefs::update(|p| p.open_meteo_api_key = val);
+    });
+    g.add(&widgets::row(
+        "Open-Meteo API key",
+        "Used when Commercial use mode is enabled.",
+        Some(api_key_entry.upcast_ref()),
+    ));
+
+    let url_entry = gtk::Entry::new();
+    url_entry.set_placeholder_text(Some("https://api.open-meteo.com/v1/forecast"));
+    url_entry.set_text(&p.custom_forecast_url);
+    url_entry.set_width_chars(24);
+    url_entry.connect_changed(|e| {
+        let val = e.text().trim().to_string();
+        prefs::update(|p| p.custom_forecast_url = val);
+    });
+    g.add(&widgets::row(
+        "Custom forecast endpoint",
+        "Leave blank for Open-Meteo's default non-commercial endpoint.",
+        Some(url_entry.upcast_ref()),
+    ));
+
+    // ----- Locations -----
+    let g = page.group("Locations");
+    g.note("Saved places appear in the sidebar under SAVED LOCATIONS.");
+    for loc in &p.saved_locations {
+        let is_active = loc.id == p.active_location_id;
+        let controls = widgets::hbox(8);
+        if is_active {
+            controls.append(&widgets::tag("Active", ""));
+        } else {
+            let select_btn = gtk::Button::with_label("Select");
+            let id = loc.id.clone();
+            select_btn.connect_clicked(move |_| {
+                window::select_location(&id);
+                settings_dialog::open();
+            });
+            controls.append(&select_btn);
+        }
+        if p.saved_locations.len() > 1 {
+            let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+            remove_btn.add_css_class("flat");
+            remove_btn.set_tooltip_text(Some("Remove location"));
+            let id = loc.id.clone();
+            remove_btn.connect_clicked(move |_| {
+                window::remove_location_with_undo(&id);
+                settings_dialog::open();
+            });
+            controls.append(&remove_btn);
+        }
+        let desc = glib::markup_escape_text(&loc.subtitle());
+        g.add(&widgets::row(&loc.name, &desc, Some(controls.upcast_ref())));
+    }
+    let (r, _) = widgets::button_row(
+        "Add a location",
+        "Search for a city or region to add to your saved places.",
+        "Search",
+        |_| {
+            nixe_ui::settings_card::close();
+            window::show_search();
+        },
+    );
+    g.add(&r);
+
+    // ----- Weather window -----
+    let g = page.group("Weather window");
+    let (r, _) = widgets::switch_row(
+        "Open as floating window",
+        "Float and center Weather in Hyprland (460×720) instead of tiling it.",
+        p.float_window,
+        |on| {
+            prefs::update(|p| p.float_window = on);
+            window::apply_floating_size(on);
+        },
+    );
+    g.add(&r);
+
+    let app_themes = theme::all();
+    let options: Vec<(String, String)> = app_themes
+        .iter()
+        .map(|t| (t.id.clone(), t.name.clone()))
+        .collect();
+    let (theme_row, theme_dd) = widgets::choice_row(
+        "Theme",
+        "Dracula, Catppuccin, Tokyo Night, One Dark Pro and more. Add your own in <tt>~/.config/nixe-weather/themes</tt>.",
+        options,
+        &p.theme,
+        |id| {
+            prefs::update(|p| {
+                p.theme = id;
+                p.mode = prefs::ThemeMode::Theme;
+            });
+            theme::apply();
+        },
+    );
+    theme_dd.set_sensitive(p.mode == prefs::ThemeMode::Theme || !theme::omarchy_available());
+
+    if theme::omarchy_available() {
+        let dd = theme_dd.clone();
+        let (r, _) = widgets::switch_row(
+            "Follow Omarchy theme",
+            "Match the desktop's colors and update live whenever the Omarchy theme changes.",
+            p.mode == prefs::ThemeMode::Omarchy,
+            move |on| {
+                prefs::update(|p| {
+                    p.mode = if on {
+                        prefs::ThemeMode::Omarchy
+                    } else {
+                        prefs::ThemeMode::Theme
+                    }
+                });
+                dd.set_sensitive(!on);
+                theme::apply();
+            },
+        );
+        g.add(&r);
+    }
+    g.add(&theme_row);
+
+    let swatches = widgets::hbox(4);
+    let refresh_swatches = {
+        let swatches = swatches.clone();
+        move || {
+            while let Some(c) = swatches.first_child() {
+                swatches.remove(&c);
+            }
+            let pal = theme::palette();
+            for c in [
+                &pal.bg,
+                &pal.surface,
+                &pal.muted,
+                &pal.text,
+                &pal.accent,
+                &pal.danger,
+            ] {
+                let s = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                s.add_css_class("swatch");
+                let provider = gtk::CssProvider::new();
+                provider.load_from_string(&format!("box {{ background: {c}; }}"));
+                #[allow(deprecated)]
+                s.style_context()
+                    .add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_USER);
+                swatches.append(&s);
+            }
+        }
+    };
+    refresh_swatches();
+    theme::subscribe(&swatches, refresh_swatches);
+    g.add(&widgets::row("Current colors", "", Some(swatches.upcast_ref())));
+
+    let (r, _) = widgets::switch_row(
+        "Glow",
+        "Soft accent glow around focused and selected elements.",
+        p.glow,
+        |on| {
+            prefs::update(|p| p.glow = on);
+            theme::apply();
+        },
+    );
+    g.add(&r);
+    let (r, _) = widgets::switch_row(
+        "Reduce motion",
+        "Turn off transitions and animations in this window.",
+        p.reduce_motion,
+        |on| {
+            prefs::update(|p| p.reduce_motion = on);
+            theme::apply();
+        },
+    );
+    g.add(&r);
+    g.add(&nixe_ui::widgets::start_row());
+
+    // ----- Keyboard -----
+    let g = page.group("Keyboard");
+    for (keys, what) in crate::window::SHORTCUTS {
+        let parts: Vec<&str> = keys.split('+').map(str::trim).collect();
+        g.add(&widgets::row(
+            what,
+            "",
+            Some(widgets::key_caps(&parts).upcast_ref()),
+        ));
+    }
+    g.note(&format!(
+        "Use <tt>{}</tt> in Waybar and <tt>{}</tt> for click-to-open.",
+        glib::markup_escape_text("nixe-weather --waybar"),
+        glib::markup_escape_text("nixe-weather --toggle"),
+    ));
+}

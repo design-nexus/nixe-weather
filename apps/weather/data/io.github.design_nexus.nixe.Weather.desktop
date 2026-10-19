@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Weather
+GenericName=Weather Forecast
+Comment=Forecasts, hourly conditions, alerts and air quality
+Exec=nixe-weather
+Icon=io.github.design_nexus.nixe.Weather
+Terminal=false
+Categories=Utility;GTK;Weather;
+Keywords=weather;forecast;temperature;rain;wind;uv;aqi;alerts;open-meteo;
+StartupNotify=true
+StartupWMClass=io.github.design_nexus.nixe.Weather
+SingleMainWindow=true
+DBusActivatable=false

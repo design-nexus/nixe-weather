@@ -1,0 +1,24 @@
+[package]
+name = "nixe-weather"
+version = "0.1.0"
+description = "Weather for Omarchy: current conditions, hourly and 7-day forecasts, air quality, and bar integration"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nixe-weather"
+path = "src/main.rs"
+
+[dependencies]
+nixe-core = { path = "../../crates/nixe-core" }
+nixe-theme = { path = "../../crates/nixe-theme" }
+nixe-ui = { path = "../../crates/nixe-ui" }
+nixe-weather-core = { path = "../../crates/nixe-weather-core" }
+anyhow = "1.0.104"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.6"
