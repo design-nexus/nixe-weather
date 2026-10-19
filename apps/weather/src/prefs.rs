@@ -123,96 +123,122 @@ impl Prefs {
     }
 }
 
-/// Apply the floating-window preference to `~/.config/hypr/nixe.lua` and the live Hyprland session.
-pub fn apply_floating_window(float: bool) {
+/// Synchronously update `~/.config/hypr/nixe.lua` to match `float`.
+/// Returns `true` if the file on disk was modified.
+pub fn write_hypr_rule(float: bool) -> bool {
     let hypr_dir = crate::paths::home().join(".config/hypr");
     let nixe_lua = hypr_dir.join("nixe.lua");
     let rule_line =
         r#"o.window("^io\\.github\\.design_nexus\\.nixe\\.Weather$", { float = true, center = true, size = { 460, 720 } })"#;
 
-    if hypr_dir.is_dir() {
-        let existing = std::fs::read_to_string(&nixe_lua).unwrap_or_else(|_| {
-            "-- Written by the Nixe installer: Nixe apps that open as floating windows.\n-- Reinstalling an app rewrites this file.\n".to_string()
-        });
-        let mut lines: Vec<&str> = existing
-            .lines()
-            .filter(|l| !l.contains("nixe\\.Weather") && !l.contains("nixe.Weather"))
-            .collect();
-        if float {
-            lines.push(rule_line);
-        }
-        let mut out = lines.join("\n");
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        let _ = crate::cmd::atomic_write(&nixe_lua, &out);
+    if !hypr_dir.is_dir() {
+        return false;
     }
+    let existing = std::fs::read_to_string(&nixe_lua).unwrap_or_else(|_| {
+        "-- Written by the Nixe installer: Nixe apps that open as floating windows.\n-- Reinstalling an app rewrites this file.\n".to_string()
+    });
+    let mut lines: Vec<&str> = existing
+        .lines()
+        .filter(|l| !l.contains("nixe\\.Weather") && !l.contains("nixe.Weather"))
+        .collect();
+    if float {
+        lines.push(rule_line);
+    }
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if out == existing {
+        return false;
+    }
+    let _ = crate::cmd::atomic_write(&nixe_lua, &out);
+    true
+}
 
-    std::thread::spawn(move || {
+/// Ensure `~/.config/hypr/nixe.lua` matches `float` before the window maps on startup.
+/// If the rule file changed, reloads Hyprland synchronously so the new window maps with the right rule.
+pub fn sync_hypr_rule_on_startup(float: bool) {
+    if write_hypr_rule(float) {
         let _ = std::process::Command::new("hyprctl").arg("reload").output();
+    }
+}
 
-        // Find all running Weather windows from `hyprctl clients -j`
-        let clients_out = std::process::Command::new("hyprctl")
-            .args(["clients", "-j"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+/// Ensure any currently mapped Weather window in Hyprland matches `float`
+/// (and is resized/centered to 460x720 when `float == true`).
+pub fn ensure_live_window_state(float: bool) {
+    let clients_out = std::process::Command::new("hyprctl")
+        .args(["clients", "-j"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
 
-        if let Some(arr) = clients_out.as_ref().and_then(|v| v.as_array()) {
-            for c in arr {
-                let class = c.get("class").and_then(|v| v.as_str()).unwrap_or("");
-                if class != "io.github.design_nexus.nixe.Weather" {
-                    continue;
+    if let Some(arr) = clients_out.as_ref().and_then(|v| v.as_array()) {
+        for c in arr {
+            let class = c.get("class").and_then(|v| v.as_str()).unwrap_or("");
+            if class != "io.github.design_nexus.nixe.Weather" {
+                continue;
+            }
+            let Some(addr) = c.get("address").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let is_floating = c.get("floating").and_then(|v| v.as_bool()).unwrap_or(false);
+            let win_sel = format!("address:{addr}");
+
+            if is_floating != float {
+                let action = if float { "on" } else { "off" };
+                let lua_float = format!(
+                    r#"hl.dsp.window.float({{ window = "{win_sel}", action = "{action}" }})"#
+                );
+                let ok = std::process::Command::new("hyprctl")
+                    .args(["dispatch", &lua_float])
+                    .output()
+                    .is_ok_and(|o| o.status.success());
+                if !ok {
+                    let _ = std::process::Command::new("hyprctl")
+                        .args(["dispatch", "togglefloating", &win_sel])
+                        .output();
                 }
-                let Some(addr) = c.get("address").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let is_floating = c.get("floating").and_then(|v| v.as_bool()).unwrap_or(false);
-                let win_sel = format!("address:{addr}");
+            }
 
-                if is_floating != float {
-                    let lua_toggle = format!(
-                        r#"hl.dsp.window.float({{ window = "{win_sel}", action = "toggle" }})"#
-                    );
-                    let ok = std::process::Command::new("hyprctl")
-                        .args(["dispatch", &lua_toggle])
-                        .output()
-                        .is_ok_and(|o| o.status.success());
-                    if !ok {
-                        let _ = std::process::Command::new("hyprctl")
-                            .args(["dispatch", "togglefloating", &win_sel])
-                            .output();
-                    }
+            if float {
+                let lua_resize = format!(
+                    r#"hl.dsp.window.resize({{ window = "{win_sel}", x = 460, y = 720 }})"#
+                );
+                let ok_r = std::process::Command::new("hyprctl")
+                    .args(["dispatch", &lua_resize])
+                    .output()
+                    .is_ok_and(|o| o.status.success());
+                if !ok_r {
+                    let _ = std::process::Command::new("hyprctl")
+                        .args(["dispatch", "resizeactive", "exact", "460", "720", &win_sel])
+                        .output();
                 }
 
-                if float {
-                    let lua_resize = format!(
-                        r#"hl.dsp.window.resize({{ window = "{win_sel}", x = 460, y = 720 }})"#
-                    );
-                    let ok_r = std::process::Command::new("hyprctl")
-                        .args(["dispatch", &lua_resize])
-                        .output()
-                        .is_ok_and(|o| o.status.success());
-                    if !ok_r {
-                        let _ = std::process::Command::new("hyprctl")
-                            .args(["dispatch", "resizeactive", "exact", "460", "720", &win_sel])
-                            .output();
-                    }
-
-                    let lua_center = format!(r#"hl.dsp.window.center({{ window = "{win_sel}" }})"#);
-                    let ok_c = std::process::Command::new("hyprctl")
-                        .args(["dispatch", &lua_center])
-                        .output()
-                        .is_ok_and(|o| o.status.success());
-                    if !ok_c {
-                        let _ = std::process::Command::new("hyprctl")
-                            .args(["dispatch", "centerwindow", &win_sel])
-                            .output();
-                    }
+                let lua_center = format!(r#"hl.dsp.window.center({{ window = "{win_sel}" }})"#);
+                let ok_c = std::process::Command::new("hyprctl")
+                    .args(["dispatch", &lua_center])
+                    .output()
+                    .is_ok_and(|o| o.status.success());
+                if !ok_c {
+                    let _ = std::process::Command::new("hyprctl")
+                        .args(["dispatch", "centerwindow", &win_sel])
+                        .output();
                 }
             }
         }
+    }
+}
+
+/// Apply the floating-window preference to `~/.config/hypr/nixe.lua` and the live Hyprland session.
+pub fn apply_floating_window(float: bool) {
+    let rule_changed = write_hypr_rule(float);
+
+    std::thread::spawn(move || {
+        if rule_changed {
+            let _ = std::process::Command::new("hyprctl").arg("reload").output();
+        }
+        ensure_live_window_state(float);
     });
 }
 

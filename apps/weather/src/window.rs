@@ -73,11 +73,11 @@ pub fn present(app: &gtk::Application, section: Option<&str>, location_arg: Opti
         return;
     }
 
+    // Ensure Hyprland rule matches user's saved preference BEFORE creating/mapping the window
+    prefs::sync_hypr_rule_on_startup(prefs::get().float_window);
+
     theme::install();
     build(app);
-
-    // Sync floating rule with user's saved preference
-    prefs::apply_floating_window(prefs::get().float_window);
 
     let start = section
         .map(String::from)
@@ -94,6 +94,12 @@ pub fn present(app: &gtk::Application, section: Option<&str>, location_arg: Opti
     if let Some(u) = ui() {
         u.borrow().window.present();
     }
+    let want_float = prefs::get().float_window;
+    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(60), move || {
+        std::thread::spawn(move || {
+            prefs::ensure_live_window_state(want_float);
+        });
+    });
     if prefs::take_broken() {
         toast("Your settings file couldn't be read, so defaults are in use.");
     }
@@ -434,6 +440,7 @@ pub fn toggle_floating_window() {
 }
 
 pub fn apply_floating_size(float: bool) {
+    prefs::write_hypr_rule(float);
     let Some(u) = ui() else { return };
     let (w, nav) = {
         let b = u.borrow();
@@ -447,6 +454,8 @@ pub fn apply_floating_size(float: bool) {
         apply_compact(&nav, true);
         w.set_default_size(460, 720);
     } else {
+        NARROW.with(|n| n.set(false));
+        apply_compact(&nav, prefs::get().sidebar_collapsed);
         w.set_default_size(1120, 800);
         settings_dialog::fit(&w);
     }
