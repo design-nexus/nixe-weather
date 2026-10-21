@@ -125,6 +125,10 @@ pub fn line_chart(
             min_v -= 1.0;
         }
 
+        // Decimals enough to tell the labels apart: a pressure in inHg moves by tenths.
+        let span = max_v - min_v;
+        let digits = if span < 2.0 { 2 } else if span < 20.0 { 1 } else { 0 };
+
         // Horizontal grid lines + Y-axis labels
         cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(10.5);
@@ -138,7 +142,7 @@ pub fn line_chart(
             let _ = cr.stroke();
 
             let val = min_v + (max_v - min_v) * frac;
-            let lbl = format!("{val:.0}{unit_suffix}");
+            let lbl = format!("{val:.digits$}{unit_suffix}");
             set_rgb(cr, dim, 0.88);
             cr.move_to(6.0, y + 3.5);
             let _ = cr.show_text(&lbl);
@@ -267,7 +271,7 @@ pub fn line_chart(
                     set_rgb(cr, text, 0.92);
                     cr.set_font_size(9.5);
                     cr.move_to(x - 8.0, (y - 7.0).max(12.0));
-                    let _ = cr.show_text(&format!("{:.0}", s.values[i]));
+                    let _ = cr.show_text(&format!("{:.digits$}", s.values[i], digits = digits.saturating_sub(1)));
                 }
             }
         }
@@ -305,7 +309,7 @@ pub fn line_chart(
             }
             for s in &series {
                 if let Some(v) = s.values.get(i).filter(|v| v.is_finite()) {
-                    lines.push((Some(series_color(s.tone)), format!("{}: {v:.1}{unit_suffix}", s.label)));
+                    lines.push((Some(series_color(s.tone)), format!("{}: {v:.prec$}{unit_suffix}", s.label, prec = digits.max(1))));
                 }
             }
             if let Some(pct) = bars_0_to_100.as_ref().and_then(|b| b.get(i)) {
