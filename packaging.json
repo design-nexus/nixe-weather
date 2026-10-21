@@ -1,0 +1,10 @@
+{
+  "application": "weather",
+  "directory": "weather",
+  "packages": [
+    "nixe-weather"
+  ],
+  "manifest": "Cargo.toml",
+  "prepare": [],
+  "binaries": []
+}

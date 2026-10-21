@@ -12,9 +12,9 @@ name = "nixe-weather"
 path = "src/main.rs"
 
 [dependencies]
-nixe-core = { path = "../../crates/nixe-core" }
-nixe-theme = { path = "../../crates/nixe-theme" }
-nixe-ui = { path = "../../crates/nixe-ui" }
+nixe-core = { git = "file:///home/ken/Projects/nixe-migration-97c1899-reviewed/nixe-core", rev = "e4595e68a4fd9b44bd15e95311ace1d0fb669bc4" }
+nixe-theme = { git = "file:///home/ken/Projects/nixe-migration-97c1899-reviewed/nixe-design", rev = "6997fb93fe248e20a19277dbd3ef219cdba18683" }
+nixe-ui = { git = "file:///home/ken/Projects/nixe-migration-97c1899-reviewed/nixe-design", rev = "6997fb93fe248e20a19277dbd3ef219cdba18683" }
 nixe-weather-core = { path = "../../crates/nixe-weather-core" }
 anyhow = "1.0.104"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
