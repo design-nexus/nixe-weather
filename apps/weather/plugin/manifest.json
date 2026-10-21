@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "design-nexus.weather",
   "name": "Weather button",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Ken",
   "license": "MIT",
-  "description": "A weather button in the bar that toggles the Weather app.",
+  "description": "The current conditions and temperature in the bar; click to toggle the Weather app.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Weather",
-    "description": "Toggles Weather. Right-click for Weather settings.",
+    "description": "Current conditions and temperature. Click toggles Weather; right-click opens its settings.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"

@@ -1,4 +1,5 @@
-//! Weather radar, infrared satellite, and spatial overlay tile client (RainViewer + CartoDB basemap).
+//! Weather radar and infrared satellite tile client (RainViewer, with Iowa Environmental
+//! Mesonet tiles for close-in US radar), over an OpenStreetMap basemap.
 
 use crate::cache::Cache;
 use crate::provider::ProviderError;
@@ -12,7 +13,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const RAINVIEWER_MAPS_URL: &str = "https://api.rainviewer.com/public/weather-maps.json";
 const MAX_TILE_BYTES: usize = 512 * 1024;
 const BASEMAP_TTL_SECS: i64 = 7 * 86_400;
+/// RainViewer tile URLs name their frame's time, so a cached one never goes stale.
 const RADAR_TILE_TTL_SECS: i64 = 3 * 3600;
+/// IEM tiles are always "latest" under the same URL.
+const LIVE_TILE_TTL_SECS: i64 = 5 * 60;
+
+/// How long a cached overlay tile at `url` stays current.
+fn overlay_ttl(url: &str) -> i64 {
+    if url.contains("mesonet.agron.iastate.edu") { LIVE_TILE_TTL_SECS } else { RADAR_TILE_TTL_SECS }
+}
+
+/// The highest zoom RainViewer serves; closer in, radar is the US-only NEXRAD mosaic.
+pub const RAINVIEWER_MAX_ZOOM: u8 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -47,17 +59,17 @@ impl RadarLayerKind {
         match self {
             Self::PrecipitationRadar => "Precipitation Radar",
             Self::InfraredSatellite => "Infrared Satellite",
-            Self::WindStreamlines => "Wind & Streamlines",
-            Self::TemperatureContour => "Temp & Isobars",
+            Self::WindStreamlines => "Wind",
+            Self::TemperatureContour => "Temp & Pressure",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::PrecipitationRadar => "RainViewer live Doppler composite + 30-minute radar nowcast (dBZ).",
-            Self::InfraredSatellite => "Global infrared cloud-top coverage and storm band imagery.",
-            Self::WindStreamlines => "Animated surface wind streamlines, directional vectors, and gust isotachs.",
-            Self::TemperatureContour => "Regional 2m temperature gradient and sea-level pressure isobar contours.",
+            Self::PrecipitationRadar => "RainViewer radar composite, past two hours (dBZ).",
+            Self::InfraredSatellite => "Infrared cloud-top imagery.",
+            Self::WindStreamlines => "Current 10 m wind over the map, from a 7×7 grid of Open-Meteo points.",
+            Self::TemperatureContour => "Current 2 m temperature and sea-level isobars (every 2 hPa), from a 7×7 grid of Open-Meteo points.",
         }
     }
 }
@@ -231,7 +243,12 @@ impl RadarClient {
     }
 
     fn is_invalid_rainviewer_tile(url: &str, bytes: &[u8]) -> bool {
-        url.contains("rainviewer.com") && (bytes.len() == 1370 || bytes.get(25) == Some(&3))
+        // RainViewer answers an unavailable tile with one fixed placeholder image.
+        url.contains("rainviewer.com") && bytes.len() == 1370
+    }
+
+    fn ttl(url: &str) -> i64 {
+        if url.contains("tile.openstreetmap.org") { BASEMAP_TTL_SECS } else { overlay_ttl(url) }
     }
 
     fn fetch_bytes_http(&self, url: &str) -> Option<Vec<u8>> {
@@ -254,7 +271,6 @@ impl RadarClient {
     fn fetch_tile_batch(
         &self,
         urls: Vec<Option<String>>,
-        ttl_secs: i64,
         now: i64,
         mut cache: Option<&mut Cache>,
     ) -> Vec<Option<Vec<u8>>> {
@@ -264,7 +280,7 @@ impl RadarClient {
         for (idx, url_opt) in urls.into_iter().enumerate() {
             let Some(url) = url_opt else { continue };
             if let Some(c) = cache.as_deref()
-                && let Ok(Some(bytes)) = c.get_tile(&url, ttl_secs, now)
+                && let Ok(Some(bytes)) = c.get_tile(&url, Self::ttl(&url), now)
                 && !Self::is_invalid_rainviewer_tile(&url, &bytes)
             {
                 results[idx] = Some(bytes);
@@ -326,7 +342,7 @@ impl RadarClient {
 
                 let ov_url = match (layer, frame) {
                     // RainViewer public tiles support z <= 7; for z > 7 use high-res IEM NEXRAD.
-                    (RadarLayerKind::PrecipitationRadar, Some(f)) if center.z <= 7 => Some(format!(
+                    (RadarLayerKind::PrecipitationRadar, Some(f)) if center.z <= RAINVIEWER_MAX_ZOOM => Some(format!(
                         "{}{}/256/{}/{tx}/{ty}/2/1_1.png",
                         host.trim_end_matches('/'),
                         f.path,
@@ -398,7 +414,7 @@ impl RadarClient {
         for u in ov_urls {
             let tile = u.and_then(|url| {
                 cache
-                    .get_tile(&url, RADAR_TILE_TTL_SECS, now)
+                    .get_tile(&url, overlay_ttl(&url), now)
                     .ok()
                     .flatten()
                     .filter(|b| !Self::is_invalid_rainviewer_tile(&url, b))
@@ -430,7 +446,7 @@ impl RadarClient {
             .unwrap_or(0);
         let (base_urls, _) =
             Self::grid_urls(center, "", None, RadarLayerKind::WindStreamlines);
-        let basemap_tiles = self.fetch_tile_batch(base_urls, BASEMAP_TTL_SECS, now, cache);
+        let basemap_tiles = self.fetch_tile_batch(base_urls, now, cache);
         TileGridPayload {
             center,
             basemap_tiles,
@@ -458,7 +474,7 @@ impl RadarClient {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let (_, ov_urls) = Self::grid_urls(center, host, frame, layer);
-        self.fetch_tile_batch(ov_urls, RADAR_TILE_TTL_SECS, now, cache)
+        self.fetch_tile_batch(ov_urls, now, cache)
     }
 
     /// Fetch a 3×3 grid of basemap + radar/satellite overlay PNG tiles around `(lat, lon)` at zoom `z`.
@@ -480,10 +496,8 @@ impl RadarClient {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let (base_urls, ov_urls) = Self::grid_urls(center, host, frame, layer);
-        let basemap_tiles =
-            self.fetch_tile_batch(base_urls, BASEMAP_TTL_SECS, now, cache.as_deref_mut());
-        let overlay_tiles =
-            self.fetch_tile_batch(ov_urls, RADAR_TILE_TTL_SECS, now, cache);
+        let basemap_tiles = self.fetch_tile_batch(base_urls, now, cache.as_deref_mut());
+        let overlay_tiles = self.fetch_tile_batch(ov_urls, now, cache);
 
         TileGridPayload {
             center,

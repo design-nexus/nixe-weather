@@ -12,16 +12,10 @@ pub fn build(
     page: &Page,
     snap: Option<&ForecastSnapshot>,
     _stale_fallback: bool,
-    _last_error: Option<&str>,
+    last_error: Option<&str>,
 ) {
     let Some(snap) = snap else {
-        let g = page.group("Sun, moon & models");
-        g.add(&widgets::empty_state(
-            "weather-clear-night-symbolic",
-            "Loading astronomy & model ensemble…",
-            "Solar trajectory, lunar phase and multi-model comparisons will appear once loaded.",
-            None,
-        ));
+        super::no_forecast(page, "Sun, moon & models", "weather-clear-night-symbolic", "Loading astronomy & model ensemble…", "Solar trajectory, lunar phase and multi-model comparisons will appear once loaded.", last_error);
         return;
     };
 
@@ -112,10 +106,10 @@ pub fn build(
     g_moon.add(&moon_card);
 
     // 3. Multi-Model Forecast Comparison (Open-Meteo, ECMWF IFS, NOAA GFS, DWD ICON)
-    if !snap.models.is_empty() {
+    if snap.models.len() > 1 {
         let g_models = page.group("Multi-model forecast comparison");
         g_models.note(
-            "Compares global and mesoscale numerical weather prediction (NWP) models: Open-Meteo Best Match, ECMWF IFS (0.25°), NOAA GFS Seamless, and DWD ICON.",
+            "Daily highs from each weather model Open-Meteo serves for this place, beside its blended forecast. Gaps are days past a model's range.",
         );
 
         let x_labels: Vec<String> = snap
@@ -152,20 +146,15 @@ pub fn build(
         g_models.add(&model_chart);
 
         for m in &snap.models {
-            let hi0 = m
-                .daily_max_c
-                .first()
-                .map(|&v| units.temperature.format(v))
+            let first = |v: &[f64]| v.first().copied().filter(|x| x.is_finite());
+            let hi0 = first(&m.daily_max_c)
+                .map(|v| units.temperature.format(v))
                 .unwrap_or_else(|| "–".into());
-            let lo0 = m
-                .daily_min_c
-                .first()
-                .map(|&v| units.temperature.format(v))
+            let lo0 = first(&m.daily_min_c)
+                .map(|v| units.temperature.format(v))
                 .unwrap_or_else(|| "–".into());
-            let p0 = m
-                .daily_precip_mm
-                .first()
-                .map(|&v| units.precipitation.format(v))
+            let p0 = first(&m.daily_precip_mm)
+                .map(|v| units.precipitation.format(v))
                 .unwrap_or_else(|| "–".into());
             let summary = format!("Today H: {hi0}  L: {lo0}  ·  Precip {p0}");
             g_models.add(&widgets::row(

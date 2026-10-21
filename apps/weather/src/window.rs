@@ -21,6 +21,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+M", "Toggle floating / tiled window"),
     ("Ctrl+1…6", "Switch section in sidebar"),
     ("Alt+1…9", "Switch saved location"),
+    ("Alt+↑ / Alt+↓", "Move the active location up or down"),
     ("Ctrl+Shift+P", "Command palette"),
     ("Ctrl+,", "Settings"),
     ("F1 / ?", "Keyboard shortcuts"),
@@ -50,6 +51,26 @@ thread_local! {
     static UI: RefCell<Option<Rc<RefCell<Ui>>>> = const { RefCell::new(None) };
     static NARROW: Cell<bool> = const { Cell::new(false) };
     static SEARCH_SEQ: Cell<u64> = const { Cell::new(0) };
+    static REFRESH_SEQ: Cell<u64> = const { Cell::new(0) };
+    /// The locations the search strip shows, so Enter can open the first.
+    static SEARCH_RESULTS: RefCell<Vec<Location>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Key caps for a SHORTCUTS entry: "Ctrl+Q / Ctrl+W" is two alternatives.
+pub fn shortcut_caps(keys: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for (i, alt) in keys.split(" / ").enumerate() {
+        if i > 0 {
+            out.push("/");
+        }
+        out.extend(alt.split('+').map(str::trim).filter(|k| !k.is_empty()));
+    }
+    out
+}
+
+/// True when the window is narrow (floating, or under 980 px).
+pub fn is_narrow() -> bool {
+    NARROW.with(|n| n.get())
 }
 
 fn ui() -> Option<Rc<RefCell<Ui>>> {
@@ -153,6 +174,7 @@ fn build(app: &gtk::Application) {
         &window,
         nixe_ui::keys::Common {
             settings: Some(settings_dialog::open),
+            close: true,
             ..Default::default()
         },
     );
@@ -241,6 +263,11 @@ fn build(app: &gtk::Application) {
 
     search.connect_search_changed(|entry| {
         on_search_changed(entry.text().to_string());
+    });
+    search.connect_activate(|_| {
+        if let Some(first) = SEARCH_RESULTS.with(|r| r.borrow().first().cloned()) {
+            open_search_result(first);
+        }
     });
     {
         let panel = search_results_panel.clone();
@@ -349,16 +376,17 @@ fn build(app: &gtk::Application) {
             glib::idle_add_local_once(move || aw(&w2));
         });
     }
-    let w2 = window.clone();
-    glib::timeout_add_local(Duration::from_millis(1500), move || {
-        apply_width(&w2);
-        glib::ControlFlow::Continue
+
+    // Coming back to the window (after suspend, or a while away) catches up: past hours
+    // and days drop off, and a stale forecast is fetched again.
+    window.connect_is_active_notify(|w| {
+        if w.is_active() {
+            catch_up();
+        }
     });
 
-    // Redraw charts on live Omarchy theme updates
-    theme::subscribe(&window, || {
-        rerender_current();
-    });
+    // Theme changes restyle through CSS, and each chart and map redraws itself
+    // (`theme::subscribe`), so pages aren't rebuilt for them.
 
     let ui = Ui {
         window,
@@ -381,6 +409,30 @@ fn build(app: &gtk::Application) {
     UI.with(|u| *u.borrow_mut() = Some(Rc::new(RefCell::new(ui))));
 
     rebuild_sidebar_locations();
+    backend::prune_forecasts(prefs::get().saved_locations.into_iter().map(|l| l.id).collect());
+}
+
+/// Refresh when the forecast is older than the refresh interval (the interval timer
+/// doesn't run during suspend), and redraw when the hour has moved on.
+fn catch_up() {
+    let Some(u) = ui() else { return };
+    let Some(fetched) = u.borrow().active_snapshot.as_ref().map(|s| (s.fetched_at, s.current.time.clone())) else {
+        return;
+    };
+    let max_age = prefs::get().refresh_interval_mins.max(5) as i64 * 60;
+    if backend::now_epoch() - fetched.0 >= max_age {
+        refresh_active(false);
+        return;
+    }
+    let advanced = {
+        let mut b = u.borrow_mut();
+        let Some(s) = b.active_snapshot.as_mut() else { return };
+        s.advance_to(backend::now_epoch());
+        s.current.time != fetched.1
+    };
+    if advanced {
+        rerender_current();
+    }
 }
 
 fn apply_compact(nav: &gtk::Box, compact: bool) {
@@ -440,7 +492,6 @@ pub fn toggle_floating_window() {
 }
 
 pub fn apply_floating_size(float: bool) {
-    prefs::write_hypr_rule(float);
     let Some(u) = ui() else { return };
     let (w, nav) = {
         let b = u.borrow();
@@ -556,11 +607,81 @@ pub fn rebuild_sidebar_locations() {
         )));
         let id = loc.id.clone();
         button.connect_clicked(move |_| select_location(&id));
+        let menu_click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
+        let (id, b2) = (loc.id.clone(), button.clone());
+        menu_click.connect_pressed(move |_, _, _, _| location_menu(&b2, &id));
+        button.add_controller(menu_click);
         loc_box.append(&button);
     }
 
     let compact = NARROW.with(|n| n.get()) || p.sidebar_collapsed;
     set_compact_hidden(&nav, compact);
+}
+
+/// The right-click menu of a saved location: rename, move, remove.
+fn location_menu(anchor: &gtk::Button, id: &str) {
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("Rename…"), Some(&format!("loc.rename('{id}')")));
+    menu.append(Some("Move up"), Some(&format!("loc.move-up('{id}')")));
+    menu.append(Some("Move down"), Some(&format!("loc.move-down('{id}')")));
+    menu.append(Some("Remove"), Some(&format!("loc.remove('{id}')")));
+    let group = gtk::gio::SimpleActionGroup::new();
+    let add = |name: &str, f: fn(&str)| {
+        let a = gtk::gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
+        a.connect_activate(move |_, v| {
+            if let Some(id) = v.and_then(|v| v.get::<String>()) {
+                f(&id);
+            }
+        });
+        group.add_action(&a);
+    };
+    add("rename", rename_location);
+    add("move-up", |id| move_location(id, -1));
+    add("move-down", |id| move_location(id, 1));
+    add("remove", remove_location_with_undo);
+    let pop = gtk::PopoverMenu::from_model(Some(&menu));
+    pop.insert_action_group("loc", Some(&group));
+    pop.set_parent(anchor);
+    pop.set_has_arrow(false);
+    pop.connect_closed(|p| {
+        let p = p.clone();
+        glib::idle_add_local_once(move || p.unparent());
+    });
+    pop.popup();
+}
+
+fn rename_location(id: &str) {
+    let Some(loc) = prefs::get().saved_locations.into_iter().find(|l| l.id == id) else { return };
+    let id = id.to_string();
+    widgets::ask_text("Rename location", "The name shown in the sidebar.", &loc.name, "Rename", move |name| {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        prefs::update(|p| {
+            if let Some(l) = p.saved_locations.iter_mut().find(|l| l.id == id) {
+                l.name = name.clone();
+            }
+        });
+        rebuild_sidebar_locations();
+        refresh_active(false);
+    });
+}
+
+/// Move a saved location `by` places in the list (Alt+Up/Down for the active one).
+pub fn move_location(id: &str, by: i32) {
+    let mut moved = false;
+    prefs::update(|p| {
+        let Some(i) = p.saved_locations.iter().position(|l| l.id == id) else { return };
+        let j = i as i32 + by;
+        if j >= 0 && (j as usize) < p.saved_locations.len() {
+            p.saved_locations.swap(i, j as usize);
+            moved = true;
+        }
+    });
+    if moved {
+        rebuild_sidebar_locations();
+    }
 }
 
 pub fn show_search() {
@@ -612,9 +733,11 @@ fn on_search_changed(text: String) {
                 }
                 match res {
                     Ok(locs) if locs.is_empty() => {
+                        SEARCH_RESULTS.with(|r| r.borrow_mut().clear());
                         list.append(&widgets::label("No matching locations found.", "dim"));
                     }
                     Ok(locs) => {
+                        SEARCH_RESULTS.with(|r| *r.borrow_mut() = locs.clone());
                         for loc in locs {
                             let row = widgets::hbox(8);
                             row.add_css_class("search-result-row");
@@ -633,31 +756,32 @@ fn on_search_changed(text: String) {
                             );
                             row.append(&coords);
 
-                            let save_btn = gtk::Button::with_label("+ Save & Open");
-                            save_btn.add_css_class("chip");
-                            save_btn.add_css_class("small");
-                            save_btn.add_css_class("suggested-action");
+                            let save_btn = widgets::icon_button("list-add-symbolic", "Save and open (Enter for the first)");
                             let loc_clone = loc.clone();
-                            save_btn.connect_clicked(move |_| {
-                                save_and_select_location(loc_clone.clone());
-                                if let Some(u) = ui() {
-                                    let b = u.borrow();
-                                    b.search.set_text("");
-                                    b.search.set_visible(false);
-                                    b.search_results_panel.set_visible(false);
-                                }
-                            });
+                            save_btn.connect_clicked(move |_| open_search_result(loc_clone.clone()));
                             row.append(&save_btn);
                             list.append(&row);
                         }
                     }
                     Err(err) => {
+                        SEARCH_RESULTS.with(|r| r.borrow_mut().clear());
                         list.append(&widgets::label(&err.to_string(), "dim"));
                     }
                 }
             },
         );
     });
+}
+
+fn open_search_result(loc: Location) {
+    save_and_select_location(loc);
+    SEARCH_RESULTS.with(|r| r.borrow_mut().clear());
+    if let Some(u) = ui() {
+        let b = u.borrow();
+        b.search.set_text("");
+        b.search.set_visible(false);
+        b.search_results_panel.set_visible(false);
+    }
 }
 
 pub fn select_location(location_id: &str) {
@@ -782,10 +906,24 @@ pub fn refresh_active(force: bool) {
 
     let cfg = p.open_meteo_config();
     let max_age = (p.refresh_interval_mins.max(5) as i64) * 60;
+    let seq = REFRESH_SEQ.with(|s| {
+        s.set(s.get() + 1);
+        s.get()
+    });
+    let loc_id = loc.id.clone();
     cmd::background(
         move || backend::load_or_fetch(&loc, &cfg, max_age, force),
         move |outcome| {
+            // A newer refresh (another location, or a forced one) has taken over.
+            if REFRESH_SEQ.with(|s| s.get()) != seq
+                || prefs::get().active_location().map(|l| l.id).as_deref() != Some(loc_id.as_str())
+            {
+                return;
+            }
             let Some(u) = ui() else { return };
+            if let Some(snap) = &outcome.snapshot {
+                crate::notify::new_alerts(snap);
+            }
             {
                 let mut b = u.borrow_mut();
                 if outcome.snapshot.is_some() {
@@ -836,10 +974,9 @@ pub fn rerender_current() {
     if let Some(s) = &snap {
         let units = prefs::get().units();
         let age = backend::human_age(s.fetched_at);
-        let state_str = if stale {
-            format!("Offline · cached {age}")
-        } else {
-            format!("Updated {age}")
+        let state_str = match (&err_str, stale) {
+            (Some(e), true) => format!("{e} · cached {age}"),
+            _ => format!("Updated {age}"),
         };
         readout_lbl.set_text(&format!(
             "{} · {} {} · {} · {} (CC BY 4.0)",
@@ -853,6 +990,10 @@ pub fn rerender_current() {
         readout_lbl.set_text(e);
     }
 
+    let snap = snap.map(|mut s| {
+        s.advance_to(backend::now_epoch());
+        s
+    });
     let page = widgets::page(&sec_id);
     build_fn(&page, snap.as_ref(), stale, err_str.as_deref());
 
@@ -861,6 +1002,20 @@ pub fn rerender_current() {
     }
     stack.add_named(&page.root, Some(&sec_id));
     stack.set_visible_child_name(&sec_id);
+
+    // Pages are rebuilt when shown, so drop the others once the crossfade is over
+    // (a hidden Radar page would otherwise keep its timers).
+    let wait = stack.transition_duration() as u64 + 50;
+    let keep = page.root.clone();
+    glib::timeout_add_local_once(Duration::from_millis(wait), move || {
+        let mut child = stack.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            if c != *keep.upcast_ref::<gtk::Widget>() && stack.visible_child().as_ref() != Some(&c) {
+                stack.remove(&c);
+            }
+        }
+    });
 }
 
 pub fn overlay() -> Option<gtk::Overlay> {
@@ -934,7 +1089,7 @@ fn show_shortcuts() {
     let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
     list.add_css_class("group-list");
     for (keys, action) in SHORTCUTS {
-        let parts: Vec<&str> = keys.split('+').map(str::trim).collect();
+        let parts = shortcut_caps(keys);
         list.append(&widgets::row(
             action,
             "",
@@ -1043,6 +1198,12 @@ fn install_keys(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
                 } else {
                     glib::Propagation::Proceed
                 }
+            }
+            gdk::Key::Up | gdk::Key::Down if alt => {
+                if let Some(loc) = prefs::get().active_location() {
+                    move_location(&loc.id, if key == gdk::Key::Up { -1 } else { 1 });
+                }
+                done
             }
             k if alt => {
                 let idx = match k {

@@ -20,73 +20,32 @@ pub fn build(
     let units = p.units();
 
     let Some(snap) = snap else {
-        let g = page.group("Current conditions");
-        if let Some(err) = last_error {
-            let banner = widgets::banner(&glib::markup_escape_text(err), true);
-            page.body.prepend(&banner);
-        }
-        g.add(&widgets::empty_state(
+        super::no_forecast(
+            page,
+            "Current conditions",
             "weather-overcast-symbolic",
             "Loading weather forecast…",
             "Fetching current conditions, hourly forecast and air quality from Open-Meteo.",
-            None,
-        ));
+            last_error,
+        );
         return;
     };
 
-    // Severe-weather alerts banner (shown only when active)
+    // Severe-weather alerts (shown only when active)
     for alert in &snap.alerts {
-        let box_banner = widgets::vbox(6);
-        box_banner.add_css_class("alert-banner");
-        let head = widgets::hbox(8);
-        let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
-        head.append(&icon);
-        let title = widgets::label(
-            &format!("{}: {}", alert.severity.label().to_uppercase(), alert.event),
-            "alert-title",
-        );
-        title.set_hexpand(true);
-        head.append(&title);
-
-        let toggle_lbl = widgets::label("Details ▾", "dim");
-        head.append(&toggle_lbl);
-        box_banner.append(&head);
-
-        let hl = widgets::label(&alert.headline, "alert-headline");
-        hl.set_wrap(true);
-        box_banner.append(&hl);
-
-        let detail_body = widgets::vbox(6);
-        detail_body.set_visible(false);
-        let desc = widgets::label(&alert.description, "alert-body");
-        desc.set_wrap(true);
-        detail_body.append(&desc);
-        if let Some(inst) = &alert.instruction {
-            let inst_lbl = widgets::label(&format!("Instruction: {inst}"), "alert-body");
-            inst_lbl.set_wrap(true);
-            detail_body.append(&inst_lbl);
-        }
-        box_banner.append(&detail_body);
-
-        let click = gtk::GestureClick::new();
-        let db = detail_body.clone();
-        let tl = toggle_lbl.clone();
-        click.connect_released(move |_, _, _, _| {
-            let open = !db.is_visible();
-            db.set_visible(open);
-            tl.set_text(if open { "Hide ▴" } else { "Details ▾" });
-        });
-        box_banner.add_controller(click);
-        page.body.append(&box_banner);
+        page.body.append(&alert_banner(alert, units.use_24h_time));
+    }
+    if snap.alerts_unavailable {
+        page.body.append(&widgets::banner("Severe-weather alerts are unavailable right now; NOAA didn't answer.", false));
     }
 
     if stale_fallback {
         let msg = format!(
-            "Offline — showing cached forecast from {}.",
+            "{} — showing the forecast from {}.",
+            last_error.unwrap_or("Offline"),
             backend::human_age(snap.fetched_at)
         );
-        let banner = widgets::banner(&glib::markup_escape_text(&msg), false);
-        page.body.append(&banner);
+        page.body.append(&super::retry_banner(&msg));
     }
 
     // 1. Current Conditions Hero Card
@@ -111,25 +70,18 @@ pub fn build(
     loc_header.append(&loc_titles);
 
     // Quick jumps to Radar and Hourly Graphs
-    let jump_box = widgets::hbox(6);
-    let radar_btn = gtk::Button::with_label("Radar");
-    radar_btn.add_css_class("chip");
-    radar_btn.add_css_class("small");
+    let jump_box = widgets::hbox(2);
+    let radar_btn = widgets::icon_button("mark-location-symbolic", "Radar (Ctrl+4)");
     radar_btn.connect_clicked(|_| window::navigate("radar"));
     jump_box.append(&radar_btn);
 
-    let graphs_btn = gtk::Button::with_label("Graphs");
-    graphs_btn.add_css_class("chip");
-    graphs_btn.add_css_class("small");
+    let graphs_btn = widgets::icon_button("view-continuous-symbolic", "Hourly graphs (Ctrl+2)");
     graphs_btn.connect_clicked(|_| window::navigate("hourly"));
     jump_box.append(&graphs_btn);
 
     let is_saved = p.saved_locations.iter().any(|l| l.id == snap.location.id);
     if !is_saved {
-        let save_btn = gtk::Button::with_label("+ Save");
-        save_btn.add_css_class("chip");
-        save_btn.add_css_class("small");
-        save_btn.add_css_class("suggested-action");
+        let save_btn = widgets::icon_button("list-add-symbolic", "Save this location");
         let loc_clone = snap.location.clone();
         save_btn.connect_clicked(move |_| window::save_and_select_location(loc_clone.clone()));
         jump_box.append(&save_btn);
@@ -174,6 +126,11 @@ pub fn build(
         "hero-low",
     ));
     cond_col.append(&meta_row);
+    if let Some(rain) = snap.rain_nowcast() {
+        let rain_lbl = widgets::label(&rain, "hero-nowcast");
+        rain_lbl.add_css_class("cond-rain");
+        cond_col.append(&rain_lbl);
+    }
     main_row.append(&cond_col);
     hero.append(&main_row);
 
@@ -196,7 +153,7 @@ pub fn build(
     quick_strip.append(&hum_lbl);
 
     if let Some(pres) = cur.pressure_hpa {
-        let p_lbl = widgets::label(&format!("{pres:.0} hPa"), "hero-stat");
+        let p_lbl = widgets::label(&units.pressure.format(pres), "hero-stat");
         p_lbl.add_css_class("hero-stat-pressure");
         quick_strip.append(&p_lbl);
     }
@@ -288,8 +245,7 @@ pub fn build(
 
     // 3. 7-Day Forecast with temperature range bars & precipitation probability
     let g_daily = page.group("7-day forecast");
-    let more_days = gtk::Button::with_label("10-Day Outlook →");
-    more_days.add_css_class("flat");
+    let more_days = widgets::icon_button("go-next-symbolic", "10-day outlook (Ctrl+3)");
     more_days.connect_clicked(|_| window::navigate("daily"));
     g_daily.header_end(&more_days);
 
@@ -341,22 +297,7 @@ pub fn build(
         min_lbl.set_xalign(1.0);
         d_row.append(&min_lbl);
 
-        // Proportional range bar
-        let bar_track = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        bar_track.add_css_class("temp-range-track");
-        bar_track.set_width_request(110);
-        bar_track.set_valign(gtk::Align::Center);
-
-        let start_frac = ((d.temp_min_c - week_min) / week_span).clamp(0.0, 1.0);
-        let span_frac = ((d.temp_max_c - d.temp_min_c) / week_span).clamp(0.08, 1.0 - start_frac);
-
-        let left_pad = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        left_pad.set_size_request((start_frac * 110.0).round() as i32, 6);
-        let fill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        fill.add_css_class("temp-range-fill");
-        fill.set_size_request((span_frac * 110.0).round().max(8.0) as i32, 6);
-        bar_track.append(&left_pad);
-        bar_track.append(&fill);
+        let bar_track = super::range_bar(d.temp_min_c, d.temp_max_c, week_min, week_span, 110);
         d_row.append(&bar_track);
 
         let max_lbl = widgets::label(&units.temperature.format(d.temp_max_c), "daily-max");
@@ -369,7 +310,7 @@ pub fn build(
 
     // 4. Expandable Details for Humidity, Wind, UV Index, Air Quality, and Sunrise/Sunset
     let g_details = page.group("Conditions & details");
-    g_details.note("Click any row to expand additional telemetry.");
+    g_details.note("Click a row, or press Enter on it, for more.");
 
     // Wind
     let (bft_num, bft_label) = beaufort_scale(cur.wind_speed_kmh);
@@ -412,7 +353,7 @@ pub fn build(
         "{}% · {}",
         cur.humidity_pct,
         cur.pressure_hpa
-            .map(|p| format!("{p:.0} hPa"))
+            .map(|p| units.pressure.format(p))
             .unwrap_or_else(|| "–".into())
     );
     let dew_str = cur
@@ -421,7 +362,7 @@ pub fn build(
         .unwrap_or_else(|| "–".into());
     let vis_str = cur
         .visibility_m
-        .map(|v| format!("{:.1} km", v / 1000.0))
+        .map(|v| units.distance.format_m(v))
         .unwrap_or_else(|| "–".into());
     g_details.add(&expandable_detail_row(
         "weather-showers-scattered-symbolic",
@@ -433,7 +374,7 @@ pub fn build(
             (
                 "Surface pressure",
                 cur.pressure_hpa
-                    .map(|p| format!("{p:.1} hPa ({:.2} inHg)", p * 0.02953))
+                    .map(|p| units.pressure.format(p))
                     .unwrap_or_else(|| "–".into()),
             ),
             ("Cloud cover", format!("{}%", cur.cloud_cover_pct)),
@@ -442,26 +383,29 @@ pub fn build(
     ));
 
     // UV Index
-    let uv_val = cur.uv_index.unwrap_or(0.0);
-    let uv_summary = format!("{uv_val:.1} · {}", uv_category(uv_val));
+    let uv_summary = cur
+        .uv_index
+        .map(|u| format!("{u:.1} · {}", uv_category(u)))
+        .unwrap_or_else(|| "Unavailable".into());
     let uv_max_today = snap
         .daily
         .first()
         .and_then(|d| d.uv_index_max)
         .map(|u| format!("{u:.1} ({})", uv_category(u)))
         .unwrap_or_else(|| "–".into());
-    let uv_advice = match uv_val {
-        x if x < 3.0 => "Minimal protection needed for normal outdoor activity.",
-        x if x < 6.0 => "Seek shade near midday; wear sunglasses and SPF 30+.",
-        x if x < 8.0 => "Reduce midday sun exposure; protective clothing recommended.",
-        _ => "Avoid midday sun; high UV exposure risk.",
+    let uv_advice = match cur.uv_index {
+        None => "No current reading.",
+        Some(x) if x < 3.0 => "Minimal protection needed for normal outdoor activity.",
+        Some(x) if x < 6.0 => "Seek shade near midday; wear sunglasses and SPF 30+.",
+        Some(x) if x < 8.0 => "Reduce midday sun exposure; protective clothing recommended.",
+        Some(_) => "Avoid midday sun; high UV exposure risk.",
     };
     g_details.add(&expandable_detail_row(
         "weather-clear-symbolic",
         "UV Index & Solar",
         &uv_summary,
         &[
-            ("Current UV index", format!("{uv_val:.1} ({})", uv_category(uv_val))),
+            ("Current UV index", uv_summary.clone()),
             ("Today's max UV", uv_max_today),
             ("Guidance", uv_advice.into()),
         ],
@@ -552,7 +496,6 @@ fn expandable_detail_row(
     outer.add_css_class("detail-expand-row");
 
     let header = widgets::hbox(10);
-    header.add_css_class("detail-expand-header");
     let icon = gtk::Image::from_icon_name(icon_name);
     icon.set_pixel_size(17);
     let icon_color = match icon_name {
@@ -572,9 +515,11 @@ fn expandable_detail_row(
     let sum_lbl = widgets::label(summary_right, "detail-summary");
     header.append(&sum_lbl);
 
-    let chevron = widgets::label("▾", "dim");
+    let chevron = gtk::Image::from_icon_name("pan-down-symbolic");
+    chevron.add_css_class("dim");
     header.append(&chevron);
-    outer.append(&header);
+    let toggle = gtk::Button::builder().child(&header).css_classes(["flat", "detail-expand-header"]).build();
+    outer.append(&toggle);
 
     let body = widgets::vbox(6);
     body.add_css_class("detail-expand-body");
@@ -591,15 +536,78 @@ fn expandable_detail_row(
     }
     outer.append(&body);
 
-    let click = gtk::GestureClick::new();
     let b2 = body.clone();
-    let c2 = chevron.clone();
-    click.connect_released(move |_, _, _, _| {
+    toggle.connect_clicked(move |_| {
         let next = !b2.is_visible();
         b2.set_visible(next);
-        c2.set_text(if next { "▴" } else { "▾" });
+        chevron.set_icon_name(Some(if next { "pan-up-symbolic" } else { "pan-down-symbolic" }));
     });
-    header.add_controller(click);
 
     outer
+}
+
+/// A severe-weather alert: a warning banner with its event and headline, and its
+/// description, instructions, area and times behind a toggle.
+fn alert_banner(alert: &nixe_weather_core::WeatherAlert, use_24h: bool) -> gtk::Box {
+    let banner = widgets::banner("", true);
+    banner.add_css_class("alert-banner");
+    // The shared banner is icon + label; put a column of our own in the label's place.
+    if let Some(l) = banner.last_child() {
+        banner.remove(&l);
+    }
+    let col = widgets::vbox(4);
+    col.set_hexpand(true);
+    let title = widgets::label(&format!("{} · {}", alert.event, alert.severity.label()), "alert-title");
+    title.set_wrap(true);
+    col.append(&title);
+    let hl = widgets::label(&alert.headline, "alert-headline");
+    hl.set_wrap(true);
+    col.append(&hl);
+
+    let details = widgets::vbox(6);
+    details.set_visible(false);
+    let when = |iso: &Option<String>| {
+        iso.as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.format(if use_24h { "%a %-d %b, %H:%M" } else { "%a %-d %b, %-I:%M %p" }).to_string())
+    };
+    let mut meta = Vec::new();
+    if let Some(t) = when(&alert.effective) {
+        meta.push(format!("From {t}"));
+    }
+    if let Some(t) = when(&alert.expires) {
+        meta.push(format!("until {t}"));
+    }
+    if let Some(sender) = &alert.sender {
+        meta.push(sender.clone());
+    }
+    if !meta.is_empty() {
+        details.append(&widgets::label(&meta.join(" · "), "dim"));
+    }
+    if !alert.area.is_empty() {
+        let area = widgets::label(&alert.area, "dim");
+        area.set_wrap(true);
+        details.append(&area);
+    }
+    let desc = widgets::label(&alert.description, "alert-body");
+    desc.set_wrap(true);
+    details.append(&desc);
+    if let Some(inst) = &alert.instruction {
+        let inst_lbl = widgets::label(&format!("Instruction: {inst}"), "alert-body");
+        inst_lbl.set_wrap(true);
+        details.append(&inst_lbl);
+    }
+    col.append(&details);
+    banner.append(&col);
+
+    let toggle = widgets::icon_button("pan-down-symbolic", "Show details");
+    toggle.set_valign(gtk::Align::Start);
+    toggle.connect_clicked(move |b| {
+        let open = !details.is_visible();
+        details.set_visible(open);
+        b.set_icon_name(if open { "pan-up-symbolic" } else { "pan-down-symbolic" });
+        b.set_tooltip_text(Some(if open { "Hide details" } else { "Show details" }));
+    });
+    banner.append(&toggle);
+    banner
 }

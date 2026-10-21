@@ -4,6 +4,7 @@ mod backend;
 mod charts;
 mod cmd;
 mod control;
+mod notify;
 mod paths;
 mod prefs;
 mod sections;
@@ -40,7 +41,7 @@ fn main() -> glib::ExitCode {
     }
 
     // Headless CLI modes run without initializing GTK or opening a display connection.
-    if args.iter().any(|a| a == "--waybar" || a == "waybar") {
+    if args.iter().any(|a| a == "--waybar") || args.get(1).is_some_and(|a| a == "waybar") {
         waybar::print_waybar_json(true);
         return glib::ExitCode::SUCCESS;
     }

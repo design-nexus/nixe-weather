@@ -128,11 +128,12 @@ impl TemperatureUnit {
     }
 
     pub fn format(self, celsius: f64) -> String {
-        format!("{:.0}°", self.convert(celsius).round())
+        // `+ 0.0` turns a rounded -0 into 0.
+        format!("{:.0}°", self.convert(celsius).round() + 0.0)
     }
 
     pub fn format_with_unit(self, celsius: f64) -> String {
-        format!("{:.0}{}", self.convert(celsius).round(), self.symbol())
+        format!("{:.0}{}", self.convert(celsius).round() + 0.0, self.symbol())
     }
 }
 
@@ -243,10 +244,97 @@ impl PrecipitationUnit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureUnit {
+    #[default]
+    Hpa,
+    Inhg,
+    Mmhg,
+}
+
+impl PressureUnit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hpa => "hpa",
+            Self::Inhg => "inhg",
+            Self::Mmhg => "mmhg",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "inhg" => Self::Inhg,
+            "mmhg" => Self::Mmhg,
+            _ => Self::Hpa,
+        }
+    }
+
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Hpa => "hPa",
+            Self::Inhg => "inHg",
+            Self::Mmhg => "mmHg",
+        }
+    }
+
+    pub fn convert(self, hpa: f64) -> f64 {
+        match self {
+            Self::Hpa => hpa,
+            Self::Inhg => hpa * 0.029_529_983,
+            Self::Mmhg => hpa * 0.750_061_68,
+        }
+    }
+
+    pub fn format(self, hpa: f64) -> String {
+        match self {
+            Self::Inhg => format!("{:.2} inHg", self.convert(hpa)),
+            _ => format!("{:.0} {}", self.convert(hpa), self.symbol()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DistanceUnit {
+    #[default]
+    Kilometers,
+    Miles,
+}
+
+impl DistanceUnit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Kilometers => "km",
+            Self::Miles => "mi",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "mi" | "miles" => Self::Miles,
+            _ => Self::Kilometers,
+        }
+    }
+
+    /// A visibility or distance in metres, as "12 km" or "7.5 mi".
+    pub fn format_m(self, metres: f64) -> String {
+        let v = match self {
+            Self::Kilometers => metres / 1000.0,
+            Self::Miles => metres / 1609.344,
+        };
+        if v < 10.0 { format!("{v:.1} {}", self.as_str()) } else { format!("{v:.0} {}", self.as_str()) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UnitPrefs {
     pub temperature: TemperatureUnit,
     pub wind_speed: WindSpeedUnit,
     pub precipitation: PrecipitationUnit,
+    #[serde(default)]
+    pub pressure: PressureUnit,
+    #[serde(default)]
+    pub distance: DistanceUnit,
     pub use_24h_time: bool,
 }
 
@@ -630,23 +718,44 @@ pub struct AirQuality {
     pub olive_pollen: Option<f64>,
     #[serde(default)]
     pub ragweed_pollen: Option<f64>,
+    /// Local time ("YYYY-MM-DDTHH:MM") of the first hourly entry below.
     #[serde(default)]
-    pub hourly_us_aqi: Vec<u16>,
+    pub hourly_start: Option<String>,
     #[serde(default)]
-    pub hourly_pm2_5: Vec<f64>,
+    pub hourly_us_aqi: Vec<Option<u16>>,
     #[serde(default)]
-    pub hourly_uv: Vec<f64>,
+    pub hourly_pm2_5: Vec<Option<f64>>,
+    #[serde(default)]
+    pub hourly_uv: Vec<Option<f64>>,
 }
 
-/// Multi-model comparison series (e.g. ECMWF IFS, NOAA GFS, DWD ICON).
+/// JSON has no NaN: serde_json writes it as `null`. These read `null` back as NaN.
+pub(crate) mod nan {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn vec<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
+        Ok(Vec::<Option<f64>>::deserialize(d)?.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
+    }
+
+    pub fn one<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
+    }
+}
+
+/// Multi-model comparison series (e.g. ECMWF IFS, NOAA GFS, DWD ICON). A missing value
+/// (a day past the model's range) is NaN.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSeries {
     pub model_id: String,
     pub model_name: String,
     pub resolution: String,
+    #[serde(deserialize_with = "nan::vec")]
     pub daily_max_c: Vec<f64>,
+    #[serde(deserialize_with = "nan::vec")]
     pub daily_min_c: Vec<f64>,
+    #[serde(deserialize_with = "nan::vec")]
     pub daily_precip_mm: Vec<f64>,
+    #[serde(deserialize_with = "nan::vec")]
     pub hourly_temp_c: Vec<f64>,
 }
 
@@ -661,10 +770,12 @@ pub enum AlertSeverity {
 }
 
 impl AlertSeverity {
+    /// The CAP severity. Whether an alert is a watch, warning or advisory is in its
+    /// event name, not here.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Minor => "Advisory",
-            Self::Moderate => "Watch",
+            Self::Minor => "Minor",
+            Self::Moderate => "Moderate",
             Self::Severe => "Severe",
             Self::Extreme => "Extreme",
         }
@@ -706,9 +817,33 @@ pub struct ForecastSnapshot {
     pub air_quality: Option<AirQuality>,
     #[serde(default)]
     pub alerts: Vec<WeatherAlert>,
+    /// True when the alert service was asked and didn't answer.
+    #[serde(default)]
+    pub alerts_unavailable: bool,
     #[serde(default)]
     pub models: Vec<ModelSeries>,
+    /// Precipitation for each 15 minutes ahead, as (local "YYYY-MM-DDTHH:MM", mm).
+    #[serde(default)]
+    pub minutely_precip: Vec<(String, f64)>,
     pub attribution: ProviderAttribution,
+}
+
+/// Local wall-clock time at `now_unix` for a place `utc_offset_seconds` from UTC.
+pub fn local_time(now_unix: i64, utc_offset_seconds: i32) -> chrono::NaiveDateTime {
+    chrono::DateTime::from_timestamp(now_unix + utc_offset_seconds as i64, 0)
+        .unwrap_or_default()
+        .naive_utc()
+}
+
+/// Seconds since the Unix epoch.
+pub fn now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Hours from `start` ("YYYY-MM-DDTHH:MM") to `now`, or None if `start` doesn't parse.
+fn hours_since(start: &str, now: chrono::NaiveDateTime) -> Option<i64> {
+    let s = chrono::NaiveDateTime::parse_from_str(start.get(..16)?, "%Y-%m-%dT%H:%M").ok()?;
+    Some((now - s).num_hours())
 }
 
 impl ForecastSnapshot {
@@ -718,6 +853,100 @@ impl ForecastSnapshot {
             .first()
             .map(|d| (d.temp_max_c, d.temp_min_c))
             .unwrap_or((self.current.temperature_c, self.current.temperature_c))
+    }
+
+    /// Drop what is already past at `now_unix`: hours before this one, days before today,
+    /// expired alerts and old nowcast steps. When the observation is from an earlier
+    /// hour (the snapshot is a cached one), "now" becomes this hour's forecast. Lists
+    /// that would be left empty are kept as they are.
+    pub fn advance_to(&mut self, now_unix: i64) {
+        let local = local_time(now_unix, self.utc_offset_seconds);
+        let hour = local.format("%Y-%m-%dT%H").to_string();
+        let today = local.format("%Y-%m-%d").to_string();
+
+        let past_days = self.daily.iter().take_while(|d| d.date < today).count();
+        if past_days > 0 && past_days < self.daily.len() {
+            self.daily.drain(..past_days);
+            for m in &mut self.models {
+                for v in [&mut m.daily_max_c, &mut m.daily_min_c, &mut m.daily_precip_mm] {
+                    v.drain(..past_days.min(v.len()));
+                }
+            }
+        }
+
+        let past_hours = self
+            .hourly
+            .iter()
+            .take_while(|h| h.time.get(..13).unwrap_or(&h.time) < hour.as_str())
+            .count();
+        if past_hours > 0 && past_hours < self.hourly.len() {
+            self.hourly.drain(..past_hours);
+            for m in &mut self.models {
+                m.hourly_temp_c.drain(..past_hours.min(m.hourly_temp_c.len()));
+            }
+        }
+
+        let observed = self.current.time.get(..13).unwrap_or(&self.current.time);
+        if observed < hour.as_str()
+            && let Some(h) = self.hourly.first().filter(|h| h.time.starts_with(&hour))
+        {
+            let c = &mut self.current;
+            c.time = h.time.clone();
+            c.temperature_c = h.temperature_c;
+            c.apparent_temperature_c = h.apparent_temperature_c;
+            c.condition = h.condition;
+            c.is_day = h.is_day;
+            c.precipitation_mm = h.precipitation_mm;
+            c.wind_speed_kmh = h.wind_speed_kmh;
+            c.wind_gusts_kmh = h.wind_gusts_kmh;
+            c.wind_direction_deg = h.wind_direction_deg.unwrap_or(c.wind_direction_deg);
+            c.humidity_pct = h.humidity_pct.unwrap_or(c.humidity_pct);
+            c.dew_point_c = h.dew_point_c;
+            c.pressure_hpa = h.pressure_hpa.or(c.pressure_hpa);
+            c.cloud_cover_pct = h.cloud_cover_pct.unwrap_or(c.cloud_cover_pct);
+            c.visibility_m = h.visibility_m;
+            c.uv_index = h.uv_index;
+        }
+
+        if let Some(aq) = &mut self.air_quality
+            && let Some(n) = aq.hourly_start.as_deref().and_then(|s| hours_since(s, local))
+            && n > 0
+        {
+            let n = n as usize;
+            for v in [&mut aq.hourly_pm2_5, &mut aq.hourly_uv] {
+                v.drain(..n.min(v.len()));
+            }
+            aq.hourly_us_aqi.drain(..n.min(aq.hourly_us_aqi.len()));
+            aq.hourly_start = Some(format!("{hour}:00"));
+        }
+
+        // Keep the step that contains now (it started up to 15 minutes ago).
+        let quarter = (local - chrono::Duration::minutes(15)).format("%Y-%m-%dT%H:%M").to_string();
+        self.minutely_precip.retain(|(t, _)| t.as_str() > quarter.as_str());
+
+        self.alerts.retain(|a| {
+            a.expires
+                .as_deref()
+                .and_then(|e| chrono::DateTime::parse_from_rfc3339(e).ok())
+                .is_none_or(|e| e.timestamp() > now_unix)
+        });
+    }
+
+    /// "Rain in 15 min", "Rain stopping in 30 min" or "Rain for the next 2 hours", from
+    /// the 15-minute nowcast; None when no rain is coming in that window.
+    pub fn rain_nowcast(&self) -> Option<String> {
+        const WET: f64 = 0.1;
+        let steps: Vec<f64> = self.minutely_precip.iter().take(8).map(|(_, mm)| *mm).collect();
+        let first = *steps.first()?;
+        let minutes = |i: usize| i * 15;
+        if first >= WET {
+            match steps.iter().position(|&mm| mm < WET) {
+                Some(i) => Some(format!("Rain stopping in {} min", minutes(i))),
+                None => Some("Rain for the next 2 hours".into()),
+            }
+        } else {
+            steps.iter().position(|&mm| mm >= WET).map(|i| format!("Rain in {} min", minutes(i)))
+        }
     }
 
     /// Up to `count` hourly entries starting at or after the current observation time.
@@ -741,6 +970,9 @@ mod tests {
         assert_eq!(TemperatureUnit::Celsius.format(20.0), "20°");
         assert_eq!(TemperatureUnit::Fahrenheit.format(0.0), "32°");
         assert_eq!(TemperatureUnit::Fahrenheit.format(20.0), "68°");
+        assert_eq!(TemperatureUnit::Celsius.format(-0.4), "0°");
+        assert_eq!(PressureUnit::Inhg.format(1013.25), "29.92 inHg");
+        assert_eq!(DistanceUnit::Miles.format_m(16_093.44), "10 mi");
         assert_eq!(WindSpeedUnit::Kmh.format(18.0), "18 km/h");
         assert_eq!(WindSpeedUnit::Ms.format(18.0), "5.0 m/s");
         assert_eq!(WindSpeedUnit::Mph.format(16.0934), "10 mph");

@@ -8,7 +8,15 @@ use std::time::Duration;
 
 pub struct Cache {
     db: Connection,
+    tiles_put: u32,
 }
+
+/// The newest schema; older caches are brought up to it once, on open.
+const VERSION: i64 = 2;
+/// Tiles kept per kind (basemap, everything else), so animating radar frames never
+/// pushes the map out.
+const TILES_KEPT: i64 = 400;
+const BASEMAP: &str = "%tile.openstreetmap.org%";
 
 impl Cache {
     /// Open or initialize the SQLite weather cache at `path`.
@@ -26,28 +34,30 @@ impl Cache {
     fn from_connection(db: Connection) -> Result<Self> {
         db.busy_timeout(Duration::from_secs(3))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        ensure!(version <= 1, "This weather cache requires a newer version of Weather");
-        db.execute_batch(
-            "PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS forecasts (
-                location_id TEXT PRIMARY KEY,
-                fetched_at INTEGER NOT NULL,
-                snapshot_json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS geocoding_cache (
-                query TEXT PRIMARY KEY,
-                fetched_at INTEGER NOT NULL,
-                locations_json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS tile_cache (
-                url TEXT PRIMARY KEY,
-                fetched_at INTEGER NOT NULL,
-                png_bytes BLOB NOT NULL
-            );
-            DELETE FROM tile_cache WHERE url LIKE '%cartocdn.com%' OR length(png_bytes) = 1370;
-            PRAGMA user_version=1;",
-        )?;
-        Ok(Self { db })
+        ensure!(version <= VERSION, "This weather cache requires a newer version of Weather");
+        if version < VERSION {
+            db.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                CREATE TABLE IF NOT EXISTS forecasts (
+                    location_id TEXT PRIMARY KEY,
+                    fetched_at INTEGER NOT NULL,
+                    snapshot_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS geocoding_cache (
+                    query TEXT PRIMARY KEY,
+                    fetched_at INTEGER NOT NULL,
+                    locations_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tile_cache (
+                    url TEXT PRIMARY KEY,
+                    fetched_at INTEGER NOT NULL,
+                    png_bytes BLOB NOT NULL
+                );
+                DELETE FROM tile_cache WHERE url LIKE '%cartocdn.com%' OR length(png_bytes) = 1370;",
+            )?;
+            db.pragma_update(None, "user_version", VERSION)?;
+        }
+        Ok(Self { db, tiles_put: 0 })
     }
 
     /// Store a normalized forecast snapshot inside a transaction.
@@ -82,11 +92,26 @@ impl Cache {
             )
             .optional()?;
         match raw {
-            Some(json) => Ok(Some(
-                serde_json::from_str(&json).context("Invalid cached forecast JSON")?,
-            )),
+            Some(json) => {
+                let mut snapshot: ForecastSnapshot =
+                    serde_json::from_str(&json).context("Invalid cached forecast JSON")?;
+                snapshot.advance_to(crate::model::now_unix());
+                Ok(Some(snapshot))
+            }
             None => Ok(None),
         }
+    }
+
+    /// Forget cached forecasts for every location not in `keep`.
+    pub fn retain_forecasts(&mut self, keep: &[&str]) -> Result<()> {
+        let ids: Vec<String> = {
+            let mut stmt = self.db.prepare("SELECT location_id FROM forecasts")?;
+            stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        for id in ids.iter().filter(|id| !keep.contains(&id.as_str())) {
+            self.db.execute("DELETE FROM forecasts WHERE location_id = ?1", params![id])?;
+        }
+        Ok(())
     }
 
     /// Return true if no cached forecast exists or its `fetched_at` is older than `max_age_secs`.
@@ -129,6 +154,11 @@ impl Cache {
                  locations_json = excluded.locations_json",
             params![key, now_epoch, json],
         )?;
+        // Searches are cached for a day; anything a month old is only taking room.
+        self.db.execute(
+            "DELETE FROM geocoding_cache WHERE fetched_at < ?1",
+            params![now_epoch - 30 * 86_400],
+        )?;
         Ok(())
     }
 
@@ -151,7 +181,8 @@ impl Cache {
         }
     }
 
-    /// Store a PNG tile in the SQLite cache and prune oldest entries if the table grows past 450 tiles.
+    /// Store a PNG tile in the SQLite cache. Every 50 tiles, the oldest of each kind
+    /// past `TILES_KEPT` are dropped.
     pub fn put_tile(&mut self, url: &str, png_bytes: &[u8], now_epoch: i64) -> Result<()> {
         self.db.execute(
             "INSERT INTO tile_cache (url, fetched_at, png_bytes)
@@ -161,13 +192,34 @@ impl Cache {
                  png_bytes = excluded.png_bytes",
             params![url, now_epoch, png_bytes],
         )?;
-        let _ = self.db.execute(
-            "DELETE FROM tile_cache WHERE url IN (
-                SELECT url FROM tile_cache ORDER BY fetched_at DESC LIMIT -1 OFFSET 450
-            )",
-            [],
-        );
+        self.tiles_put += 1;
+        if self.tiles_put % 50 == 1 {
+            for kind in ["url LIKE ?1", "url NOT LIKE ?1"] {
+                let _ = self.db.execute(
+                    &format!(
+                        "DELETE FROM tile_cache WHERE url IN (
+                            SELECT url FROM tile_cache WHERE {kind}
+                            ORDER BY fetched_at DESC LIMIT -1 OFFSET ?2
+                        )"
+                    ),
+                    params![BASEMAP, TILES_KEPT],
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// Store a surface field under `key` (it shares the tile table).
+    pub fn put_field(&mut self, key: &str, grid: &crate::field::FieldGrid) -> Result<()> {
+        let json = serde_json::to_vec(grid)?;
+        self.put_tile(&format!("field:{key}"), &json, grid.fetched_at)
+    }
+
+    /// A surface field stored under `key`, if younger than `max_age_secs`.
+    pub fn get_field(&self, key: &str, max_age_secs: i64, now_epoch: i64) -> Result<Option<crate::field::FieldGrid>> {
+        Ok(self
+            .get_tile(&format!("field:{key}"), max_age_secs, now_epoch)?
+            .and_then(|b| serde_json::from_slice(&b).ok()))
     }
 
     /// Retrieve a cached PNG tile if younger than `max_age_secs`.
@@ -220,7 +272,9 @@ mod tests {
             daily: vec![],
             air_quality: None,
             alerts: vec![],
+            alerts_unavailable: false,
             models: vec![],
+            minutely_precip: vec![],
             attribution: ProviderAttribution {
                 provider_id: "open-meteo".into(),
                 provider_name: "Open-Meteo".into(),
@@ -230,6 +284,27 @@ mod tests {
                 commercial_use_allowed: false,
             },
         }
+    }
+
+    #[test]
+    fn round_trips_missing_model_values() -> Result<()> {
+        let mut cache = Cache::open_in_memory()?;
+        let loc = Location::new("Austin", None, None, Some("US".into()), 30.0, -97.0, None, None);
+        let mut snap = sample_snapshot(loc.clone(), 9_000, 20.0);
+        snap.models.push(crate::model::ModelSeries {
+            model_id: "icon_seamless".into(),
+            model_name: "DWD ICON".into(),
+            resolution: String::new(),
+            daily_max_c: vec![20.0, f64::NAN],
+            daily_min_c: vec![10.0, f64::NAN],
+            daily_precip_mm: vec![],
+            hourly_temp_c: vec![],
+        });
+        cache.put_forecast(&snap)?;
+        let back = cache.get_forecast(&loc.id)?.unwrap();
+        assert_eq!(back.models[0].daily_max_c[0], 20.0);
+        assert!(back.models[0].daily_max_c[1].is_nan());
+        Ok(())
     }
 
     #[test]

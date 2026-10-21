@@ -6,10 +6,13 @@ use crate::theme::{self, Rgb};
 use gtk::prelude::*;
 use gtk::{cairo, gdk_pixbuf, glib};
 use nixe_weather_core::{
-    ForecastSnapshot, MoonPhaseInfo, RadarLayerKind, TileGridPayload, UnitPrefs,
+    FieldGrid, ForecastSnapshot, MoonPhaseInfo, RadarLayerKind, TileGridPayload, UnitPrefs,
     cardinal_direction,
 };
 use std::f64::consts::PI;
+
+/// Every chart label is in the suite's monospace face.
+const MONO: &str = "JetBrains Mono";
 
 fn set_rgb(cr: &cairo::Context, c: Rgb, a: f64) {
     cr.set_source_rgba(c.0, c.1, c.2, a);
@@ -59,6 +62,27 @@ pub fn line_chart(
         }
     });
 
+    // The pointer's x while it is over the chart: the nearest point is read out.
+    let hover = std::rc::Rc::new(std::cell::Cell::new(None::<f64>));
+    let motion = gtk::EventControllerMotion::new();
+    {
+        let (h, a) = (hover.clone(), area.downgrade());
+        motion.connect_motion(move |_, x, _| {
+            h.set(Some(x));
+            if let Some(a) = a.upgrade() {
+                a.queue_draw();
+            }
+        });
+        let (h, a) = (hover.clone(), area.downgrade());
+        motion.connect_leave(move |_| {
+            h.set(None);
+            if let Some(a) = a.upgrade() {
+                a.queue_draw();
+            }
+        });
+    }
+    area.add_controller(motion);
+
     area.set_draw_func(move |_, cr, w, h| {
         let w = w as f64;
         let h = h as f64;
@@ -67,6 +91,7 @@ pub fn line_chart(
         let text = Rgb::hex(&p.text);
         let dim = Rgb::hex(&p.dim_text);
         let border = Rgb::hex(&p.border);
+        let surface = Rgb::hex(&p.surface);
 
         let pad_l = 48.0;
         let pad_r = 18.0;
@@ -101,7 +126,7 @@ pub fn line_chart(
         }
 
         // Horizontal grid lines + Y-axis labels
-        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(10.5);
         for i in 0..=4 {
             let frac = i as f64 / 4.0;
@@ -175,32 +200,51 @@ pub fn line_chart(
                 (x, y)
             };
 
-            if s_idx == 0 && !s.dashed {
-                cr.new_path();
-                let (x0, y0) = pt(0);
-                cr.move_to(x0, pad_t + ch);
-                cr.line_to(x0, y0);
-                for i in 1..n {
-                    let (x, y) = pt(i);
-                    cr.line_to(x, y);
+            // Runs of finite values; a missing value (NaN) leaves a gap.
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            let mut i = 0;
+            while i < n {
+                if !s.values[i].is_finite() {
+                    i += 1;
+                    continue;
                 }
-                let (xn, _) = pt(n - 1);
-                cr.line_to(xn, pad_t + ch);
-                cr.close_path();
+                let start = i;
+                while i < n && s.values[i].is_finite() {
+                    i += 1;
+                }
+                runs.push((start, i));
+            }
 
-                let grad = cairo::LinearGradient::new(0.0, pad_t, 0.0, pad_t + ch);
-                grad.add_color_stop_rgba(0.0, col.0, col.1, col.2, 0.34);
-                grad.add_color_stop_rgba(1.0, col.0, col.1, col.2, 0.02);
-                let _ = cr.set_source(&grad);
-                let _ = cr.fill();
+            if s_idx == 0 && !s.dashed {
+                for &(a, b) in runs.iter().filter(|(a, b)| b - a > 1) {
+                    cr.new_path();
+                    let (x0, y0) = pt(a);
+                    cr.move_to(x0, pad_t + ch);
+                    cr.line_to(x0, y0);
+                    for i in a + 1..b {
+                        let (x, y) = pt(i);
+                        cr.line_to(x, y);
+                    }
+                    let (xn, _) = pt(b - 1);
+                    cr.line_to(xn, pad_t + ch);
+                    cr.close_path();
+
+                    let grad = cairo::LinearGradient::new(0.0, pad_t, 0.0, pad_t + ch);
+                    grad.add_color_stop_rgba(0.0, col.0, col.1, col.2, 0.34);
+                    grad.add_color_stop_rgba(1.0, col.0, col.1, col.2, 0.02);
+                    let _ = cr.set_source(&grad);
+                    let _ = cr.fill();
+                }
             }
 
             cr.new_path();
-            let (x0, y0) = pt(0);
-            cr.move_to(x0, y0);
-            for i in 1..n {
-                let (x, y) = pt(i);
-                cr.line_to(x, y);
+            for &(a, b) in &runs {
+                let (x0, y0) = pt(a);
+                cr.move_to(x0, y0);
+                for i in a + 1..b {
+                    let (x, y) = pt(i);
+                    cr.line_to(x, y);
+                }
             }
             set_rgb(cr, col, if s.dashed { 0.88 } else { 0.98 });
             cr.set_line_width(if s.dashed { 1.8 } else { 2.5 });
@@ -214,7 +258,7 @@ pub fn line_chart(
 
             // Data point dots & labels at sparse intervals
             let dot_stride = (n / 8).max(1);
-            for i in (0..n).step_by(dot_stride) {
+            for i in (0..n).step_by(dot_stride).filter(|&i| s.values[i].is_finite()) {
                 let (x, y) = pt(i);
                 set_rgb(cr, col, 1.0);
                 cr.arc(x, y, 3.2, 0.0, 2.0 * PI);
@@ -239,7 +283,59 @@ pub fn line_chart(
             set_rgb(cr, text, 0.92);
             cr.move_to(lx + 12.0, 14.5);
             let _ = cr.show_text(&s.label);
-            lx += (s.label.len() as f64 * 6.5) + 28.0;
+            lx += (s.label.chars().count() as f64 * 6.5) + 28.0;
+        }
+
+        // Hover readout: a line at the nearest point and its values.
+        let n = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
+        if let Some(hx) = hover.get()
+            && n > 1
+        {
+            let i = (((hx - pad_l) / cw) * (n - 1) as f64).round().clamp(0.0, (n - 1) as f64) as usize;
+            let x = pad_l + (i as f64 / (n - 1) as f64) * cw;
+            set_rgb(cr, dim, 0.7);
+            cr.set_line_width(1.0);
+            cr.move_to(x, pad_t);
+            cr.line_to(x, pad_t + ch);
+            let _ = cr.stroke();
+
+            let mut lines: Vec<(Option<Rgb>, String)> = Vec::new();
+            if let Some(l) = x_labels.get(i) {
+                lines.push((None, l.clone()));
+            }
+            for s in &series {
+                if let Some(v) = s.values.get(i).filter(|v| v.is_finite()) {
+                    lines.push((Some(series_color(s.tone)), format!("{}: {v:.1}{unit_suffix}", s.label)));
+                }
+            }
+            if let Some(pct) = bars_0_to_100.as_ref().and_then(|b| b.get(i)) {
+                lines.push((Some(wc.rain), format!("Chance of rain: {pct:.0}%")));
+            }
+            cr.set_font_size(10.5);
+            let widest = lines
+                .iter()
+                .filter_map(|(_, t)| cr.text_extents(t).ok().map(|e| e.x_advance()))
+                .fold(0.0, f64::max);
+            let (bw, bh) = (widest + 20.0, lines.len() as f64 * 15.0 + 8.0);
+            let bx = if x + 10.0 + bw < w { x + 10.0 } else { (x - 10.0 - bw).max(0.0) };
+            let by = pad_t;
+            set_rgb(cr, surface, 0.96);
+            cr.rectangle(bx, by, bw, bh);
+            let _ = cr.fill();
+            set_rgb(cr, border, 0.8);
+            cr.rectangle(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0);
+            let _ = cr.stroke();
+            for (k, (c, t)) in lines.iter().enumerate() {
+                let ty = by + 15.0 + k as f64 * 15.0;
+                if let Some(c) = c {
+                    set_rgb(cr, *c, 1.0);
+                    cr.arc(bx + 8.0, ty - 3.5, 3.0, 0.0, 2.0 * PI);
+                    let _ = cr.fill();
+                }
+                set_rgb(cr, text, 0.95);
+                cr.move_to(bx + 14.0, ty);
+                let _ = cr.show_text(t);
+            }
         }
     });
 
@@ -363,7 +459,7 @@ pub fn solar_arc_canvas(
         let _ = cr.fill();
 
         // Labels for Sunrise, Solar Noon, Sunset
-        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(10.5);
         set_rgb(cr, dim, 0.92);
         cr.move_to(pad_x + span_w * 0.20, horizon_y + 18.0);
@@ -654,11 +750,13 @@ pub fn draw_radar_map(
     h: f64,
     layer: RadarLayerKind,
     grid: Option<&TileGridPayload>,
+    field: Option<&FieldGrid>,
     snap: Option<&ForecastSnapshot>,
     units: UnitPrefs,
     opacity: f64,
     anim_phase: f64,
     pinch_scale: f64,
+    notice: Option<&str>,
 ) {
     let p = theme::palette();
     let wc = theme::weather_colors_for(&p);
@@ -676,22 +774,13 @@ pub fn draw_radar_map(
 
     let cx = w * 0.5;
     let cy = h * 0.5;
+    let layout = grid.map(|g| MapLayout::new(g.center, w, h, pinch_scale));
 
     // 1. Draw 3×3 slippy map basemap + radar/satellite overlay tiles scaled uniformly
     //    so the map always fills 100% of the canvas width & height while keeping 1:1 aspect ratio.
-    if let Some(g) = grid {
-        let cover_x = (1.0 + g.center.frac_x).min(2.0 - g.center.frac_x).max(0.5);
-        let cover_y = (1.0 + g.center.frac_y).min(2.0 - g.center.frac_y).max(0.5);
-        let min_tile_w = (w * 0.5) / cover_x;
-        let min_tile_h = (h * 0.5) / cover_y;
-        let min_cover_px = min_tile_w.max(min_tile_h).max(256.0);
-        let base_tile_px = min_cover_px * 1.18;
-        let tile_px = (base_tile_px * pinch_scale.clamp(0.85, 2.0))
-            .max(min_cover_px)
-            .ceil();
+    if let (Some(g), Some(l)) = (grid, layout) {
+        let MapLayout { tile_px, origin_x: center_origin_x, origin_y: center_origin_y, .. } = l;
         let scale = (tile_px + 0.5) / 256.0;
-        let center_origin_x = (cx - g.center.frac_x * tile_px).floor();
-        let center_origin_y = (cy - g.center.frac_y * tile_px).floor();
 
         cr.save().ok();
         cr.rectangle(0.0, 0.0, w, h);
@@ -751,96 +840,12 @@ pub fn draw_radar_map(
         let _ = cr.stroke();
     }
 
-    // 2. Vector meteorological overlays for Wind Streamlines or Temperature & Pressure Isobars
-    if let Some(s) = snap {
+    // 2. Fields drawn from the 7×7 Open-Meteo grid: wind arrows, or temperature shading
+    //    with isobars.
+    if let (Some(f), Some(l)) = (field, layout) {
         match layer {
-            RadarLayerKind::WindStreamlines => {
-                let dir_deg = s.current.wind_direction_deg as f64;
-                // Meteorological wind direction is where wind blows FROM; convert to flow vector
-                let flow_rad = (dir_deg + 90.0).to_radians();
-                let vx = flow_rad.cos();
-                let vy = flow_rad.sin();
-
-                // Isotach rings around location
-                for ring in 1..=3 {
-                    let r = ring as f64 * 72.0;
-                    set_rgb(cr, wc.wind, 0.24 * opacity);
-                    cr.set_line_width(1.2);
-                    cr.set_dash(&[6.0, 6.0], 0.0);
-                    cr.arc(cx, cy, r, 0.0, 2.0 * PI);
-                    let _ = cr.stroke();
-                }
-                cr.set_dash(&[], 0.0);
-
-                // Animated streamlines & directional arrows
-                let step = 58.0;
-                cr.set_line_width(2.0);
-                for gy in (-4..=4).map(|i| cy + i as f64 * step) {
-                    for gx in (-6..=6).map(|i| cx + i as f64 * step) {
-                        let shift = ((anim_phase * 28.0) + (gx * 0.03 + gy * 0.02)).rem_euclid(28.0);
-                        let sx = gx + vx * (shift - 14.0);
-                        let sy = gy + vy * (shift - 14.0);
-                        let len = 26.0;
-                        let ex = sx + vx * len;
-                        let ey = sy + vy * len;
-
-                        set_rgb(cr, wc.wind.mix(wc.rain, 0.35), 0.78 * opacity);
-                        cr.move_to(sx, sy);
-                        cr.line_to(ex, ey);
-                        let _ = cr.stroke();
-
-                        // Arrowhead
-                        let head = 6.5;
-                        let a1 = flow_rad + 2.6;
-                        let a2 = flow_rad - 2.6;
-                        cr.move_to(ex, ey);
-                        cr.line_to(ex + a1.cos() * head, ey + a1.sin() * head);
-                        cr.move_to(ex, ey);
-                        cr.line_to(ex + a2.cos() * head, ey + a2.sin() * head);
-                        let _ = cr.stroke();
-                    }
-                }
-            }
-            RadarLayerKind::TemperatureContour => {
-                // Radial thermal field + sea-level pressure isobar contours
-                let temp_c = s.current.temperature_c;
-                let warm_col = if temp_c >= 25.0 {
-                    wc.danger.mix(wc.warm, 0.4)
-                } else if temp_c >= 12.0 {
-                    wc.sun.mix(wc.warm, 0.4)
-                } else {
-                    wc.cold.mix(wc.rain, 0.4)
-                };
-
-                let rad = cairo::RadialGradient::new(cx, cy, 15.0, cx, cy, w.max(h) * 0.55);
-                rad.add_color_stop_rgba(0.0, warm_col.0, warm_col.1, warm_col.2, 0.42 * opacity);
-                rad.add_color_stop_rgba(0.6, accent.0, accent.1, accent.2, 0.22 * opacity);
-                rad.add_color_stop_rgba(1.0, bg.0, bg.1, bg.2, 0.05 * opacity);
-                let _ = cr.set_source(&rad);
-                cr.rectangle(0.0, 0.0, w, h);
-                let _ = cr.fill();
-
-                let base_p = s.current.pressure_hpa.unwrap_or(1013.2);
-                cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-                cr.set_font_size(10.0);
-                for i in 1..=4 {
-                    let rx = i as f64 * 78.0;
-                    let ry = i as f64 * 56.0;
-                    cr.save().ok();
-                    cr.translate(cx, cy);
-                    cr.scale(rx, ry);
-                    cr.arc(0.0, 0.0, 1.0, 0.0, 2.0 * PI);
-                    cr.restore().ok();
-                    set_rgb(cr, text, 0.45 * opacity);
-                    cr.set_line_width(1.3);
-                    let _ = cr.stroke();
-
-                    let iso_p = base_p + (i as f64 - 2.0) * 2.0;
-                    set_rgb(cr, text, 0.88);
-                    cr.move_to(cx + 8.0, (cy - ry - 4.0).max(16.0));
-                    let _ = cr.show_text(&format!("{iso_p:.0} hPa"));
-                }
-            }
+            RadarLayerKind::WindStreamlines => draw_wind_field(cr, f, l, wc, units, opacity, anim_phase),
+            RadarLayerKind::TemperatureContour => draw_temp_field(cr, f, l, wc, text, units, opacity),
             _ => {}
         }
     }
@@ -861,13 +866,13 @@ pub fn draw_radar_map(
     if let Some(s) = snap {
         let hud_text = match layer {
             RadarLayerKind::PrecipitationRadar => format!(
-                "{} · Precip {}% · {:.1} mm",
+                "{} · Precip {}% · {}",
                 s.location.name,
                 s.hourly
                     .first()
                     .map(|h| h.precipitation_probability_pct)
                     .unwrap_or(0),
-                s.current.precipitation_mm
+                units.precipitation.format(s.current.precipitation_mm)
             ),
             RadarLayerKind::InfraredSatellite => format!(
                 "{} · Cloud Cover {}% · Vis {}",
@@ -875,7 +880,7 @@ pub fn draw_radar_map(
                 s.current.cloud_cover_pct,
                 s.current
                     .visibility_m
-                    .map(|v| format!("{:.1} km", v / 1000.0))
+                    .map(|v| units.distance.format_m(v))
                     .unwrap_or_else(|| "–".into())
             ),
             RadarLayerKind::WindStreamlines => format!(
@@ -889,27 +894,237 @@ pub fn draw_radar_map(
                     .unwrap_or_else(|| "Steady".into())
             ),
             RadarLayerKind::TemperatureContour => format!(
-                "{} · {} (Feels {}) · {:.0} hPa",
+                "{} · {} (Feels {}) · {}",
                 s.location.name,
                 units.temperature.format_with_unit(s.current.temperature_c),
                 units
                     .temperature
                     .format_with_unit(s.current.apparent_temperature_c),
-                s.current.pressure_hpa.unwrap_or(1013.0)
+                s.current
+                    .pressure_hpa
+                    .map(|p| units.pressure.format(p))
+                    .unwrap_or_else(|| "–".into())
             ),
         };
 
+        cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+        cr.set_font_size(11.0);
+        let tw = cr.text_extents(&hud_text).map(|e| e.x_advance()).unwrap_or(hud_text.len() as f64 * 6.8);
         set_rgb(cr, bg, 0.84);
-        cr.rectangle(12.0, 12.0, (hud_text.len() as f64 * 6.8) + 22.0, 28.0);
+        cr.rectangle(12.0, 12.0, tw + 20.0, 28.0);
         let _ = cr.fill();
         set_rgb(cr, accent, 0.45);
         cr.set_line_width(1.0);
-        cr.rectangle(12.0, 12.0, (hud_text.len() as f64 * 6.8) + 22.0, 28.0);
+        cr.rectangle(12.0, 12.0, tw + 20.0, 28.0);
         let _ = cr.stroke();
         set_rgb(cr, text, 0.96);
-        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-        cr.set_font_size(11.0);
         cr.move_to(22.0, 30.0);
         let _ = cr.show_text(&hud_text);
     }
+
+    // A note when the layer has nothing to show here (no radar coverage, field loading).
+    if let Some(n) = notice {
+        cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        cr.set_font_size(11.0);
+        let tw = cr.text_extents(n).map(|e| e.x_advance()).unwrap_or(0.0);
+        let (bx, by) = ((cx - tw / 2.0 - 10.0).max(8.0), h - 72.0);
+        set_rgb(cr, bg, 0.88);
+        cr.rectangle(bx, by, tw + 20.0, 26.0);
+        let _ = cr.fill();
+        set_rgb(cr, text, 0.92);
+        cr.move_to(bx + 10.0, by + 17.0);
+        let _ = cr.show_text(n);
+    }
+
+    // Map data credits, which the tile services ask for.
+    let credit = match layer {
+        RadarLayerKind::PrecipitationRadar | RadarLayerKind::InfraredSatellite => {
+            "© OpenStreetMap contributors · Radar: RainViewer, IEM"
+        }
+        _ => "© OpenStreetMap contributors · Data: Open-Meteo",
+    };
+    cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.set_font_size(9.5);
+    let tw = cr.text_extents(credit).map(|e| e.x_advance()).unwrap_or(0.0);
+    set_rgb(cr, bg, 0.78);
+    cr.rectangle(w - tw - 14.0, h - 18.0, tw + 14.0, 18.0);
+    let _ = cr.fill();
+    set_rgb(cr, dim, 1.0);
+    cr.move_to(w - tw - 7.0, h - 5.5);
+    let _ = cr.show_text(credit);
+}
+
+/// Where the 3×3 tile map sits on the canvas: the centre tile's size and its top-left
+/// corner, so a lat/lon can be placed on it.
+#[derive(Clone, Copy)]
+struct MapLayout {
+    center: nixe_weather_core::TileCoord,
+    tile_px: f64,
+    origin_x: f64,
+    origin_y: f64,
+}
+
+impl MapLayout {
+    fn new(center: nixe_weather_core::TileCoord, w: f64, h: f64, pinch_scale: f64) -> Self {
+        let cover_x = (1.0 + center.frac_x).min(2.0 - center.frac_x).max(0.5);
+        let cover_y = (1.0 + center.frac_y).min(2.0 - center.frac_y).max(0.5);
+        let min_cover_px = ((w * 0.5) / cover_x).max((h * 0.5) / cover_y).max(256.0);
+        let tile_px = (min_cover_px * 1.18 * pinch_scale.clamp(0.85, 2.0)).max(min_cover_px).ceil();
+        Self {
+            center,
+            tile_px,
+            origin_x: (w * 0.5 - center.frac_x * tile_px).floor(),
+            origin_y: (h * 0.5 - center.frac_y * tile_px).floor(),
+        }
+    }
+
+    /// Canvas position of (`lat`, `lon`).
+    fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
+        let n = (1u32 << self.center.z) as f64;
+        let xf = (lon + 180.0) / 360.0 * n;
+        let lat_rad = lat.clamp(-85.0511, 85.0511).to_radians();
+        let yf = (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / PI) / 2.0 * n;
+        (
+            self.origin_x + (xf - self.center.x as f64) * self.tile_px,
+            self.origin_y + (yf - self.center.y as f64) * self.tile_px,
+        )
+    }
+
+    /// Canvas position of grid position (`gx`, `gy`) of `f`.
+    fn project_grid(&self, f: &FieldGrid, gx: f64, gy: f64) -> (f64, f64) {
+        let max = (f.size - 1).max(1) as f64;
+        let b = f.bounds;
+        self.project(b.north + (b.south - b.north) * gy / max, b.west + (b.east - b.west) * gx / max)
+    }
+}
+
+/// Wind arrows over the map, from the grid interpolated as vectors: each points where
+/// the air is going, longer and warmer-coloured the stronger it blows, and drifts along
+/// its direction with `anim_phase`.
+fn draw_wind_field(
+    cr: &cairo::Context,
+    f: &FieldGrid,
+    l: MapLayout,
+    wc: theme::WeatherColors,
+    units: UnitPrefs,
+    opacity: f64,
+    anim_phase: f64,
+) {
+    let max_speed = f.range(|p| p.wind_speed_kmh).map(|r| r.1).unwrap_or(0.0).max(1.0);
+    let steps = 16;
+    cr.set_line_width(2.0);
+    cr.set_line_cap(cairo::LineCap::Round);
+    for r in 0..=steps {
+        for c in 0..=steps {
+            let max = (f.size - 1) as f64;
+            let (gx, gy) = (c as f64 / steps as f64 * max, r as f64 / steps as f64 * max);
+            let (u, v) = f.wind(gx, gy);
+            let speed = u.hypot(v);
+            if !speed.is_finite() || speed < 0.5 {
+                continue;
+            }
+            // Canvas y grows southwards.
+            let (dx, dy) = (u / speed, -v / speed);
+            let len = 10.0 + 22.0 * (speed / max_speed);
+            let (x, y) = l.project_grid(f, gx, gy);
+            let drift = (anim_phase + (c * 7 + r * 3) as f64 * 0.13).fract() * 10.0 - 5.0;
+            let (sx, sy) = (x + dx * drift - dx * len / 2.0, y + dy * drift - dy * len / 2.0);
+            let (ex, ey) = (sx + dx * len, sy + dy * len);
+            let col = wc.wind.mix(wc.warm, (speed / max_speed).clamp(0.0, 1.0) * 0.7);
+            set_rgb(cr, col, 0.85 * opacity);
+            cr.move_to(sx, sy);
+            cr.line_to(ex, ey);
+            let ang = dy.atan2(dx);
+            for side in [2.6, -2.6] {
+                cr.move_to(ex, ey);
+                cr.line_to(ex + (ang + side).cos() * 6.0, ey + (ang + side).sin() * 6.0);
+            }
+            let _ = cr.stroke();
+        }
+    }
+    cr.set_line_cap(cairo::LineCap::Butt);
+    legend(cr, &format!("Wind 10 m · up to {}", units.wind_speed.format(max_speed)), wc.wind);
+}
+
+/// Temperature shading (cold to warm across the map's own range) with sea-level
+/// isobars every 2 hPa, labelled.
+fn draw_temp_field(
+    cr: &cairo::Context,
+    f: &FieldGrid,
+    l: MapLayout,
+    wc: theme::WeatherColors,
+    text: Rgb,
+    units: UnitPrefs,
+    opacity: f64,
+) {
+    let max = (f.size - 1) as f64;
+    if let Some((lo, hi)) = f.range(|p| p.temperature_c) {
+        let span = (hi - lo).max(1.0);
+        let cells = 24;
+        for r in 0..cells {
+            for c in 0..cells {
+                let (gx0, gy0) = (c as f64 / cells as f64 * max, r as f64 / cells as f64 * max);
+                let (gx1, gy1) = ((c + 1) as f64 / cells as f64 * max, (r + 1) as f64 / cells as f64 * max);
+                let t = f.sample((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0, |p| p.temperature_c);
+                if !t.is_finite() {
+                    continue;
+                }
+                let frac = ((t - lo) / span).clamp(0.0, 1.0);
+                let col = if frac < 0.5 { wc.cold.mix(wc.sun, frac * 2.0) } else { wc.sun.mix(wc.danger, (frac - 0.5) * 2.0) };
+                let (x0, y0) = l.project_grid(f, gx0, gy0);
+                let (x1, y1) = l.project_grid(f, gx1, gy1);
+                set_rgb(cr, col, 0.30 * opacity);
+                cr.rectangle(x0, y0, x1 - x0 + 0.5, y1 - y0 + 0.5);
+                let _ = cr.fill();
+            }
+        }
+        legend(
+            cr,
+            &format!("2 m temperature {} – {}", units.temperature.format(lo), units.temperature.format(hi)),
+            wc.sun,
+        );
+    }
+
+    let Some((plo, phi)) = f.range(|p| p.pressure_hpa) else { return };
+    cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+    cr.set_font_size(10.0);
+    let mut level = (plo / 2.0).ceil() * 2.0;
+    while level <= phi {
+        let segs = f.contour(level, |p| p.pressure_hpa);
+        set_rgb(cr, text, 0.55 * opacity);
+        cr.set_line_width(1.3);
+        for [a, b] in &segs {
+            let (x0, y0) = l.project_grid(f, a.0, a.1);
+            let (x1, y1) = l.project_grid(f, b.0, b.1);
+            cr.move_to(x0, y0);
+            cr.line_to(x1, y1);
+        }
+        let _ = cr.stroke();
+        // Label the isobar once, near its middle.
+        if let Some([a, _]) = segs.get(segs.len() / 2) {
+            let (x, y) = l.project_grid(f, a.0, a.1);
+            set_rgb(cr, text, 0.9);
+            cr.move_to(x + 4.0, y - 4.0);
+            let _ = cr.show_text(&units.pressure.format(level));
+        }
+        level += 2.0;
+    }
+}
+
+/// A one-line key in the map's bottom-left corner.
+fn legend(cr: &cairo::Context, label: &str, col: Rgb) {
+    let p = theme::palette();
+    cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.set_font_size(10.5);
+    let tw = cr.text_extents(label).map(|e| e.x_advance()).unwrap_or(0.0);
+    let (x, y) = (12.0, cr.clip_extents().map(|e| e.3).unwrap_or(400.0) - 46.0);
+    set_rgb(cr, Rgb::hex(&p.bg), 0.84);
+    cr.rectangle(x, y, tw + 30.0, 22.0);
+    let _ = cr.fill();
+    set_rgb(cr, col, 1.0);
+    cr.arc(x + 11.0, y + 11.0, 4.0, 0.0, 2.0 * PI);
+    let _ = cr.fill();
+    set_rgb(cr, Rgb::hex(&p.text), 0.95);
+    cr.move_to(x + 20.0, y + 15.0);
+    let _ = cr.show_text(label);
 }

@@ -66,11 +66,8 @@
 
 /* ---------- Severe weather alert banner ---------- */
 
+/* The shared warning banner (alpha(danger) tint and border); only spacing here. */
 .alert-banner {
-  border: 1px solid alpha(@theme_danger, 0.52);
-  background: linear-gradient(90deg, alpha(@theme_danger, 0.16), alpha(@weather_warm, 0.08));
-  border-radius: 10px;
-  padding: 12px 16px;
   margin-bottom: 12px;
 }
 
@@ -93,13 +90,7 @@
 /* ---------- Current conditions hero ---------- */
 
 .hero-card {
-  border: 1px solid alpha(@theme_accent, 0.28);
-  background: linear-gradient(
-    135deg,
-    alpha(@theme_accent, 0.11),
-    alpha(@weather_rain, 0.05) 55%,
-    alpha(@weather_sun, 0.07)
-  );
+  border: 1px solid @hairline;
   border-radius: 10px;
   padding: 18px 20px;
   margin-bottom: 6px;
@@ -117,7 +108,7 @@
 }
 
 .hero-temp {
-  font-size: 2.85em;
+  font-size: 2.2em;
   font-weight: 700;
   color: @theme_text;
   font-feature-settings: "tnum";
@@ -127,6 +118,11 @@
   font-size: 1.06em;
   font-weight: 600;
   color: @theme_accent;
+}
+
+.hero-nowcast {
+  font-size: 0.9em;
+  font-weight: 600;
 }
 
 .hero-meta {
@@ -280,9 +276,11 @@
   border-top: none;
 }
 
-.detail-expand-header {
+button.detail-expand-header {
   min-height: 48px;
   padding: 10px 18px;
+  border-radius: 0;
+  font-weight: normal;
 }
 
 .detail-expand-header:hover {
@@ -303,7 +301,6 @@
 .detail-expand-body {
   padding: 10px 18px 14px 44px;
   border-top: 1px solid @divider;
-  background: alpha(@theme_surface, 0.45);
   font-size: 0.88em;
 }
 
@@ -332,7 +329,6 @@
 
 .moon-hero-row {
   padding: 14px 18px;
-  background: linear-gradient(135deg, alpha(@weather_uv, 0.08), alpha(@weather_sun, 0.05));
 }
 
 /* ---------- Location search strip & results ---------- */

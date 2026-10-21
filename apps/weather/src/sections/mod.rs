@@ -38,7 +38,7 @@ pub fn all() -> Vec<Section> {
             group: "Forecast",
             title: "Hourly & Graphs",
             icon: "view-continuous-symbolic",
-            description: "48-hour temperature, precipitation, wind, pressure and radiation curves",
+            description: "48-hour temperature, precipitation, wind, humidity and pressure curves",
             nav: true,
             build: hourly::build,
         },
@@ -56,7 +56,7 @@ pub fn all() -> Vec<Section> {
             group: "Maps & Radar",
             title: "Radar & Overlays",
             icon: "mark-location-symbolic",
-            description: "Live RainViewer Doppler radar, infrared satellite, wind streamlines and isobars",
+            description: "RainViewer radar, infrared satellite, and current wind, temperature and pressure maps",
             nav: true,
             build: radar::build,
         },
@@ -79,6 +79,66 @@ pub fn all() -> Vec<Section> {
             build: astronomy::build,
         },
     ]
+}
+
+/// A warning banner with one action, Retry.
+pub fn retry_banner(text: &str) -> gtk::Box {
+    use gtk::prelude::*;
+    let banner = crate::widgets::banner(&gtk::glib::markup_escape_text(text), true);
+    let retry = gtk::Button::with_label("Retry");
+    retry.set_valign(gtk::Align::Center);
+    retry.connect_clicked(|_| crate::window::refresh_active(true));
+    banner.append(&retry);
+    banner
+}
+
+/// A page with no forecast to show: still loading, or (after `last_error`) nothing
+/// cached and the service unreachable.
+pub fn no_forecast(page: &Page, group: &str, icon: &str, loading: &str, desc: &str, last_error: Option<&str>) {
+    use gtk::prelude::*;
+    let g = page.group(group);
+    match last_error {
+        Some(err) => {
+            page.body.prepend(&retry_banner(err));
+            g.add(&crate::widgets::empty_state(
+                icon,
+                "No forecast yet",
+                "Weather couldn't reach the forecast service and has nothing cached for this place.",
+                None,
+            ));
+        }
+        None => g.add(&crate::widgets::empty_state(icon, loading, desc, None)),
+    }
+}
+
+/// Where a day's low-to-high bar starts and how long it is, as fractions of the track,
+/// given the period's lowest low and its span. The bar is at least 8% long and never
+/// runs past the end.
+pub fn range_fracs(lo: f64, hi: f64, period_lo: f64, period_span: f64) -> (f64, f64) {
+    let span = period_span.max(f64::EPSILON);
+    let start = ((lo - period_lo) / span).clamp(0.0, 1.0);
+    let len = ((hi - lo) / span).max(0.08);
+    let start = start.min(1.0 - 0.08);
+    (start, len.min(1.0 - start))
+}
+
+/// A day's temperature range bar, `width` px wide, over the period's `period_lo` and span.
+pub fn range_bar(lo: f64, hi: f64, period_lo: f64, period_span: f64, width: i32) -> gtk::Box {
+    use gtk::prelude::*;
+    let track = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    track.add_css_class("temp-range-track");
+    track.set_width_request(width);
+    track.set_valign(gtk::Align::Center);
+    let (start, len) = range_fracs(lo, hi, period_lo, period_span);
+    let w = width as f64;
+    let pad = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    pad.set_size_request((start * w).round() as i32, 6);
+    let fill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    fill.add_css_class("temp-range-fill");
+    fill.set_size_request((len * w).round().max(8.0) as i32, 6);
+    track.append(&pad);
+    track.append(&fill);
+    track
 }
 
 pub fn format_clock_label(iso: &str, use_24h: bool) -> String {
@@ -148,4 +208,19 @@ pub fn format_duration_secs(secs: Option<f64>) -> String {
     let h = total_mins / 60;
     let m = total_mins % 60;
     format!("{h}h {m:02}m")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::range_fracs;
+
+    #[test]
+    fn range_bars_stay_on_the_track() {
+        // A day whose range sits at the top of the week's (it used to panic).
+        let (start, len) = range_fracs(19.8, 20.5, 10.0, 10.5);
+        assert!(start + len <= 1.0 + 1e-9 && len >= 0.079);
+        assert_eq!(range_fracs(10.0, 20.0, 10.0, 10.0), (0.0, 1.0));
+        let (start, len) = range_fracs(15.0, 15.0, 10.0, 0.0);
+        assert!(start + len <= 1.0 + 1e-9);
+    }
 }

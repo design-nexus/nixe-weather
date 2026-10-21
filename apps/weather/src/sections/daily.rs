@@ -12,16 +12,10 @@ pub fn build(
     page: &Page,
     snap: Option<&ForecastSnapshot>,
     _stale_fallback: bool,
-    _last_error: Option<&str>,
+    last_error: Option<&str>,
 ) {
     let Some(snap) = snap else {
-        let g = page.group("10-day outlook");
-        g.add(&widgets::empty_state(
-            "x-office-calendar-symbolic",
-            "Loading 10-day outlook…",
-            "Extended daily forecasts will appear once the forecast loads.",
-            None,
-        ));
+        super::no_forecast(page, "10-day outlook", "x-office-calendar-symbolic", "Loading 10-day outlook…", "Extended daily forecasts will appear once the forecast loads.", last_error);
         return;
     };
 
@@ -99,10 +93,12 @@ pub fn build(
         outer.add_css_class("detail-expand-row");
 
         let header = widgets::hbox(10);
-        header.add_css_class("detail-expand-header");
 
         let day_lbl = widgets::label(&format_day_full(&d.date, idx), "detail-title");
-        day_lbl.set_width_chars(18);
+        // Shrinks (ellipsized) in a floating 460 px window.
+        day_lbl.set_width_chars(10);
+        day_lbl.set_max_width_chars(19);
+        day_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
         header.append(&day_lbl);
 
         let icon = gtk::Image::from_icon_name(d.condition.icon_name(true));
@@ -130,19 +126,7 @@ pub fn build(
         min_lbl.set_xalign(1.0);
         header.append(&min_lbl);
 
-        let bar_track = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        bar_track.add_css_class("temp-range-track");
-        bar_track.set_width_request(96);
-        bar_track.set_valign(gtk::Align::Center);
-        let start_frac = ((d.temp_min_c - all_min) / all_span).clamp(0.0, 1.0);
-        let span_frac = ((d.temp_max_c - d.temp_min_c) / all_span).clamp(0.08, 1.0 - start_frac);
-        let left_pad = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        left_pad.set_size_request((start_frac * 96.0).round() as i32, 6);
-        let fill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        fill.add_css_class("temp-range-fill");
-        fill.set_size_request((span_frac * 96.0).round().max(8.0) as i32, 6);
-        bar_track.append(&left_pad);
-        bar_track.append(&fill);
+        let bar_track = super::range_bar(d.temp_min_c, d.temp_max_c, all_min, all_span, 96);
         header.append(&bar_track);
 
         let max_lbl = widgets::label(&units.temperature.format(d.temp_max_c), "daily-max");
@@ -150,16 +134,15 @@ pub fn build(
         max_lbl.set_xalign(1.0);
         header.append(&max_lbl);
 
-        let chevron = widgets::label("▾", "dim");
+        let chevron = gtk::Image::from_icon_name(if idx == 0 { "pan-up-symbolic" } else { "pan-down-symbolic" });
+        chevron.add_css_class("dim");
         header.append(&chevron);
-        outer.append(&header);
+        let toggle = gtk::Button::builder().child(&header).css_classes(["flat", "detail-expand-header"]).build();
+        outer.append(&toggle);
 
         let body = widgets::vbox(6);
         body.add_css_class("detail-expand-body");
         body.set_visible(idx == 0);
-        if idx == 0 {
-            chevron.set_text("▴");
-        }
 
         let app_range = match (d.apparent_max_c, d.apparent_min_c) {
             (Some(hi), Some(lo)) => format!(
@@ -225,15 +208,12 @@ pub fn build(
         }
         outer.append(&body);
 
-        let click = gtk::GestureClick::new();
         let b2 = body.clone();
-        let c2 = chevron.clone();
-        click.connect_released(move |_, _, _, _| {
+        toggle.connect_clicked(move |_| {
             let next = !b2.is_visible();
             b2.set_visible(next);
-            c2.set_text(if next { "▴" } else { "▾" });
+            chevron.set_icon_name(Some(if next { "pan-up-symbolic" } else { "pan-down-symbolic" }));
         });
-        header.add_controller(click);
 
         g_days.add(&outer);
     }

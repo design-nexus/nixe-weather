@@ -76,6 +76,20 @@ fn rotate_hue(c: Rgb, deg: f64, min_sat: f64, target_light: Option<f64>) -> Rgb 
 /// Resolve the active `WeatherColors` from Omarchy's `colors.toml` (when in Omarchy mode)
 /// or by harmonizing against the active `Palette`.
 pub fn weather_colors_for(p: &Palette) -> WeatherColors {
+    // Charts ask on every frame; work it out (and read colors.toml) once per palette.
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(String, WeatherColors)>> = const { std::cell::RefCell::new(None) };
+    }
+    let key = format!("{:?}{}{}{}", prefs::get().mode, p.accent, p.danger, p.light);
+    if let Some(wc) = LAST.with(|l| l.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, wc)| *wc)) {
+        return wc;
+    }
+    let wc = derive_weather_colors(p);
+    LAST.with(|l| *l.borrow_mut() = Some((key, wc)));
+    wc
+}
+
+fn derive_weather_colors(p: &Palette) -> WeatherColors {
     let accent = Rgb::hex(&p.accent);
     let danger = Rgb::hex(&p.danger);
     let tl = if p.light { Some(0.46) } else { Some(0.72) };

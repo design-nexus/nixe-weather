@@ -1,76 +1,86 @@
-# Weather (`nixe-weather`)
+# Weather
 
-A full-fledged native Linux desktop weather application for the **Nixe** suite, built with Rust, GTK 4, and Cairo, optimized for Omarchy and Hyprland.
+Forecasts, hourly conditions, radar, air quality and severe-weather alerts for the places
+you save, in a GTK 4 window.
 
 ## Features
 
-- **Full Nixe App Layout & Optional Floating Mode:**
-  - Opens as a standard tiled Nixe application (`1120×800`) with a collapsible `.settings-navigation` sidebar (`Ctrl+B`, or automatically icon-only below `980px`) and saved locations in the sidebar.
-  - **Floating Window Option (`Settings → Weather window` or `Ctrl+M`):** Toggle between standard Hyprland tiling and a floating centered window (`1040×740`) at any time. Writes to `~/.config/hypr/nixe.lua` and reloads/toggles Hyprland live via `hyprctl`.
-- **6 Dedicated Meteorological Sections (`Alt+1`–`Alt+6`):**
-  1. **Overview (`overview`):**
-     - Current location, condition icon, temperature, feels-like, and high/low summary.
-     - Active **NOAA / NWS** severe-weather alert banner (expandable, hidden when none are active).
-     - Horizontally scrollable **24-hour forecast** strip.
-     - **7-day forecast** with proportional temperature range bars and precipitation probabilities.
-     - Expandable condition cards for **Wind & Gusts (with Beaufort scale)**, **Humidity / Dew Point / Surface Pressure / Visibility / Cloud Cover**, **UV Index**, **Air Quality (US EPA AQI & PM2.5/PM10)**, and **Sunrise / Sunset / Daylight / Solar Radiation**.
-  2. **Hourly & Graphs (`hourly`):**
-     - **48-Hour Temperature, Feels-Like & Precipitation Probability** Cairo chart.
-     - **48-Hour Wind Speed & Gusts** Cairo chart.
-     - **48-Hour Relative Humidity & Cloud Cover** Cairo chart.
-     - Complete 48-hour meteorological breakdown table.
-  3. **10-Day Outlook (`daily`):**
-     - **10-Day High / Low & Precipitation Trend** Cairo chart.
-     - Expandable **10-day forecast cards** with apparent high/low, precipitation sum/hours/probability, max wind & gusts, dominant wind direction, UV max, sunrise/sunset, daylight/sunshine duration, and shortwave solar radiation (`MJ/m²`).
-  4. **Radar & Overlays (`radar`):**
-     - Interactive multi-layer map studio over a 3×3 Web Mercator CartoDB dark/light slippy-map tile grid cached in SQLite:
-       - **Precipitation Radar:** Live RainViewer global Doppler radar reflectivity (`dBZ`) + 30-minute radar nowcast frames.
-       - **Infrared Satellite:** RainViewer global infrared cloud-top coverage tiles.
-       - **Wind & Streamlines:** Animated surface wind streamlines, directional vector arrows, and isotach rings.
-       - **Temp & Isobars:** Regional 2m temperature gradient field with sea-level pressure (`hPa`) isobar contours.
-     - Includes **Zoom (`Z4`–`Z10`)**, **Overlay Opacity (`35%`–`100%`)**, **Play/Pause** animation, and a **Timeline Frame Scrubber**.
-  5. **Air Quality & Pollen (`air-quality`):**
-     - **US EPA AQI** and **European EAQI** with health recommendations.
-     - **24-Hour US AQI & PM2.5** Cairo trend chart.
-     - **Particulates & Trace Gases:** `PM2.5`, `PM10`, `Ozone (O₃)`, `Nitrogen Dioxide (NO₂)`, `Sulfur Dioxide (SO₂)`, `Carbon Monoxide (CO)`, `Saharan/Mineral Dust`, and `Aerosol Optical Depth (AOD)`.
-     - **Allergens & Pollen (6 species):** `Grass`, `Birch`, `Alder`, `Olive`, `Ragweed`, and `Mugwort` (`grains/m³`).
-     - **UV & Clear-Sky UV Index** with protection guidance.
-  6. **Sun, Moon & Models (`astronomy`):**
-     - **Sun & Daylight Trajectory:** Cairo solar elevation arc with live sun position, golden hour, daylight/sunshine duration, and daily daylight delta.
-     - **Moon Phase & Lunar Cycle:** Cairo illuminated lunar disc with phase name, illumination %, synodic cycle age, and countdowns to next Full Moon and New Moon.
-     - **Multi-Model Forecast Comparison:** Compares **Open-Meteo Best Match**, **ECMWF IFS (0.25°)**, **NOAA GFS Seamless**, and **DWD ICON Seamless** with a multi-series Cairo chart and model spread (confidence) indicator.
+- **Overview:** current conditions with feels-like and today's high and low, rain in the
+  next two hours ("Rain in 15 min"), severe-weather alerts (US, from NOAA/NWS) with their
+  area, times and instructions, a 24-hour strip, a 7-day forecast with range bars, and
+  expandable wind, humidity and pressure, UV, air quality and sun details.
+- **Hourly & Graphs:** 48-hour charts of temperature and feels-like with the chance of
+  rain, wind and gusts, humidity and cloud cover, and surface pressure; hover a chart for
+  its values. An hour-by-hour table follows.
+- **10-Day Outlook:** a high, low and rain chart and a card for each day.
+- **Radar & Overlays:** a map with four layers: RainViewer radar for the past two hours
+  (closer in, the US NEXRAD mosaic), infrared satellite, and the current wind and the
+  temperature with sea-level isobars, both drawn from a 7×7 grid of Open-Meteo points over
+  the map. Zoom with the buttons, Ctrl+scroll, a double-click or a pinch; play the radar
+  loop; set the overlay's opacity.
+- **Air Quality & Pollen:** US AQI and European EAQI with guidance, a 24-hour AQI and PM2.5
+  chart, particulates and trace gases, pollen (forecast for Europe only), and UV.
+- **Sun, Moon & Models:** the sun's path and daylight, the moon's phase, and each day's
+  high from the ECMWF, GFS and ICON models beside the blended forecast.
+- **Saved locations** in the sidebar with their current temperature; right-click one to
+  rename, move or remove it.
+- **Notifications** for new Severe and Extreme alerts.
+- **Units:** temperature, wind, precipitation, pressure, distance and the clock, defaulting
+  to the system locale's.
+- **Offline:** the last forecast for each place is kept, and shown (moved on to the
+  current hour) when the service can't be reached.
+- **Floating window:** Ctrl+M or Settings → Weather window floats it centered at 460×720.
+- **Waybar and the Omarchy bar:** `--waybar` prints a Waybar module, and the installer adds a
+  bar widget that shows the conditions and temperature (turn it on in Settings → Plugins).
 
-## CLI & Waybar Usage
+## Install
 
-```bash
-# Open or focus Weather
-nixe-weather
-
-# Toggle window visibility (ideal for Waybar on-click)
-nixe-weather --toggle
-
-# Open directly to a specific section (overview, hourly, daily, radar, air-quality, astronomy, settings)
-nixe-weather --section radar
-
-# Open and switch to (or geocode & save) a specific city
-nixe-weather --location "Tokyo"
-
-# Output Waybar JSON from SQLite cache (auto-fetches only if cache is stale)
-nixe-weather --waybar
-
-# Refresh all saved locations in the SQLite cache and exit
-nixe-weather --refresh
+```sh
+curl -fsSL https://raw.githubusercontent.com/design-nexus/nixe/main/install.sh | bash -s -- weather
 ```
 
-## Configuration & Cache Paths
+This builds with Cargo and installs `nixe-weather` to `~/.local/bin` with a launcher
+entry. To remove it, run the same line with `uninstall.sh` in place of `install.sh`.
 
-- **Settings:** `~/.config/nixe-weather/settings.toml`
-- **SQLite Forecast & Radar Tile Cache:** `~/.cache/nixe-weather/cache.db`
-- **Unix Control Socket (Glimpse / Calendar / D-Bus bridge):** `$XDG_RUNTIME_DIR/nixe/nixe-weather.sock`
+## Usage
 
-## Attribution & Licensing
+```
+nixe-weather                      Open or focus Weather
+nixe-weather --toggle             Open, or close it if it's open
+nixe-weather --section NAME       overview, hourly, daily, radar, air-quality, astronomy, settings
+nixe-weather --location "Tokyo"   Switch to a saved place, or find and save it
+nixe-weather --waybar             Waybar JSON, fetching first if the forecast is stale
+nixe-weather --waybar-cached      Waybar JSON from the cache only
+nixe-weather --refresh            Refresh every saved place and exit
+```
 
-- **Weather Forecast, Air Quality & Geocoding:** [Open-Meteo.com](https://open-meteo.com/) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Free hosted endpoints are strictly for non-commercial use; configure a self-hosted or commercial API key in `Settings → Units & forecast` if required.
-- **Radar & Infrared Satellite Tiles:** [RainViewer API](https://www.rainviewer.com/api.html).
-- **Basemap Tiles:** [CARTO](https://carto.com/attributions) & [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
-- **US Severe Weather Alerts:** [NOAA / National Weather Service API](https://www.weather.gov/documentation/services-web-api) (Public Domain).
+## Keys
+
+| Key | Action |
+| --- | --- |
+| Ctrl+F | Search for a place (Enter saves and opens the first result) |
+| Ctrl+R, F5 | Refresh |
+| Ctrl+1 … Ctrl+6 | Overview, Hourly, 10-Day, Radar, Air Quality, Sun & Moon |
+| Alt+1 … Alt+9 | Switch saved place |
+| Alt+↑, Alt+↓ | Move the active place up or down |
+| Ctrl+M | Floating or tiled window |
+| Ctrl+B | Collapse the sidebar |
+| Ctrl+, | Settings |
+| F1, ? | Keyboard shortcuts |
+| Ctrl+Q, Ctrl+W | Close |
+
+## Files
+
+- Settings: `~/.config/nixe-weather/settings.toml`
+- Forecast, search, map tile and grid cache: `~/.cache/nixe-weather/weather.db`
+- Nixe Assistant works Weather over the session bus: `current`, `forecast`, `query`, `locations`, `select_location`, `refresh`.
+
+## Data
+
+- Forecasts, air quality, geocoding and the map grids: [Open-Meteo](https://open-meteo.com/),
+  CC BY 4.0. The free service is for non-commercial use; with an API key (Settings →
+  Units & forecast) requests go to Open-Meteo's customer servers, or point it at your own.
+- Radar and satellite: [RainViewer](https://www.rainviewer.com/api.html) and the
+  [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/).
+- Map: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
+- US alerts: [NOAA / National Weather Service](https://www.weather.gov/documentation/services-web-api).

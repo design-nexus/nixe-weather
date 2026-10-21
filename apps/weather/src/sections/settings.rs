@@ -4,9 +4,11 @@ use crate::widgets::{self, Page};
 use crate::{prefs, settings_dialog, theme, window};
 use gtk::glib;
 use gtk::prelude::*;
-use nixe_weather_core::{PrecipitationUnit, TemperatureUnit, WindSpeedUnit};
+use nixe_weather_core::{DistanceUnit, PrecipitationUnit, PressureUnit, TemperatureUnit, WindSpeedUnit};
 
 fn apply_units(change: impl FnOnce(&mut prefs::Prefs)) {
+    // The sidebar's temperature badges use the units too.
+    glib::idle_add_local_once(window::rebuild_sidebar_locations);
     prefs::update(change);
     window::rerender_current();
 }
@@ -41,6 +43,20 @@ pub fn build(page: &Page) {
         widgets::opts(&[("mm", "mm"), ("inch", "in")]),
         p.precipitation_unit.as_str(),
         |v| apply_units(|p| p.precipitation_unit = PrecipitationUnit::from_id(&v)),
+    ));
+    g.add(&widgets::segmented_row(
+        "Pressure",
+        "Unit for air pressure.",
+        widgets::opts(&[("hpa", "hPa"), ("inhg", "inHg"), ("mmhg", "mmHg")]),
+        p.pressure_unit.as_str(),
+        |v| apply_units(|p| p.pressure_unit = PressureUnit::from_id(&v)),
+    ));
+    g.add(&widgets::segmented_row(
+        "Distance",
+        "Unit for visibility.",
+        widgets::opts(&[("km", "km"), ("mi", "mi")]),
+        p.distance_unit.as_str(),
+        |v| apply_units(|p| p.distance_unit = DistanceUnit::from_id(&v)),
     ));
     g.add(&widgets::segmented_row(
         "Time format",
@@ -81,6 +97,13 @@ pub fn build(page: &Page) {
         },
     );
     g.add(&r);
+    let (r, _) = widgets::switch_row(
+        "Notify severe alerts",
+        "Send a desktop notification when a new Severe or Extreme alert is issued for the active location.",
+        p.notify_alerts,
+        |on| prefs::update(|p| p.notify_alerts = on),
+    );
+    g.add(&r);
 
     let (r, _) = widgets::switch_row(
         "Commercial use mode",
@@ -104,40 +127,75 @@ pub fn build(page: &Page) {
     });
     g.add(&widgets::row(
         "Open-Meteo API key",
-        "Used when Commercial use mode is enabled.",
+        "With a key, requests go to Open-Meteo's customer servers.",
         Some(api_key_entry.upcast_ref()),
     ));
 
-    let url_entry = gtk::Entry::new();
-    url_entry.set_placeholder_text(Some("https://api.open-meteo.com/v1/forecast"));
-    url_entry.set_text(&p.custom_forecast_url);
-    url_entry.set_width_chars(24);
-    url_entry.connect_changed(|e| {
-        let val = e.text().trim().to_string();
-        prefs::update(|p| p.custom_forecast_url = val);
-    });
-    g.add(&widgets::row(
-        "Custom forecast endpoint",
-        "Leave blank for Open-Meteo's default non-commercial endpoint.",
-        Some(url_entry.upcast_ref()),
-    ));
+    for (title, placeholder, current, set) in [
+        (
+            "Custom forecast endpoint",
+            "https://api.open-meteo.com/v1/forecast",
+            p.custom_forecast_url.clone(),
+            (|p: &mut prefs::Prefs, v: String| p.custom_forecast_url = v) as fn(&mut prefs::Prefs, String),
+        ),
+        (
+            "Custom air-quality endpoint",
+            "https://air-quality-api.open-meteo.com/v1/air-quality",
+            p.custom_air_quality_url.clone(),
+            |p, v| p.custom_air_quality_url = v,
+        ),
+        (
+            "Custom geocoding endpoint",
+            "https://geocoding-api.open-meteo.com/v1/search",
+            p.custom_geocoding_url.clone(),
+            |p, v| p.custom_geocoding_url = v,
+        ),
+    ] {
+        let entry = gtk::Entry::new();
+        entry.set_placeholder_text(Some(placeholder));
+        entry.set_text(&current);
+        entry.set_width_chars(24);
+        entry.connect_changed(move |e| {
+            let val = e.text().trim().to_string();
+            prefs::update(|p| set(p, val));
+        });
+        g.add(&widgets::row(
+            title,
+            "Leave blank for Open-Meteo's own server (a self-hosted instance goes here).",
+            Some(entry.upcast_ref()),
+        ));
+    }
 
     // ----- Locations -----
     let g = page.group("Locations");
     g.note("Saved places appear in the sidebar under SAVED LOCATIONS.");
-    for loc in &p.saved_locations {
+    let count = p.saved_locations.len();
+    for (i, loc) in p.saved_locations.iter().enumerate() {
         let is_active = loc.id == p.active_location_id;
-        let controls = widgets::hbox(8);
+        let controls = widgets::hbox(4);
         if is_active {
             controls.append(&widgets::tag("Active", ""));
         } else {
-            let select_btn = gtk::Button::with_label("Select");
+            let select_btn = widgets::icon_button("object-select-symbolic", "Make active");
             let id = loc.id.clone();
             select_btn.connect_clicked(move |_| {
                 window::select_location(&id);
                 settings_dialog::open();
             });
             controls.append(&select_btn);
+        }
+        for (icon, tip, by, enabled) in [
+            ("go-up-symbolic", "Move up (Alt+↑ for the active one)", -1, i > 0),
+            ("go-down-symbolic", "Move down (Alt+↓ for the active one)", 1, i + 1 < count),
+        ] {
+            let b = widgets::icon_button(icon, tip);
+            b.set_sensitive(enabled);
+            let id = loc.id.clone();
+            b.connect_clicked(move |_| {
+                window::move_location(&id, by);
+                settings_dialog::open();
+            });
+            controls.append(&b);
         }
         if p.saved_locations.len() > 1 {
             let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
@@ -153,16 +211,16 @@ pub fn build(page: &Page) {
         let desc = glib::markup_escape_text(&loc.subtitle());
         g.add(&widgets::row(&loc.name, &desc, Some(controls.upcast_ref())));
     }
-    let (r, _) = widgets::button_row(
+    let add = widgets::icon_button("list-add-symbolic", "Add a location (Ctrl+F)");
+    add.connect_clicked(|_| {
+        nixe_ui::settings_card::close();
+        window::show_search();
+    });
+    g.add(&widgets::row(
         "Add a location",
-        "Search for a city or region to add to your saved places.",
-        "Search",
-        |_| {
-            nixe_ui::settings_card::close();
-            window::show_search();
-        },
-    );
-    g.add(&r);
+        "Search for a city or region to add to your saved places. Right-click a place in the sidebar to rename it.",
+        Some(add.upcast_ref()),
+    ));
 
     // ----- Weather window -----
     let g = page.group("Weather window");
@@ -275,7 +333,7 @@ pub fn build(page: &Page) {
     // ----- Keyboard -----
     let g = page.group("Keyboard");
     for (keys, what) in crate::window::SHORTCUTS {
-        let parts: Vec<&str> = keys.split('+').map(str::trim).collect();
+        let parts = window::shortcut_caps(keys);
         g.add(&widgets::row(
             what,
             "",

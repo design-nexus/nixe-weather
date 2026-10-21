@@ -7,6 +7,7 @@ use crate::model::{
     AirQuality, CurrentWeather, DailyForecast, ForecastSnapshot, HourlyForecast, Location,
     ProviderAttribution, WeatherCondition,
 };
+use crate::field::{Bounds, FieldGrid, FieldPoint};
 use crate::noaa::NoaaAlertProvider;
 use crate::provider::{AlertProvider, ProviderError, WeatherProvider};
 use reqwest::{
@@ -122,7 +123,7 @@ impl OpenMeteoProvider {
         self.check_licensing()?;
         self.throttle();
 
-        let mut url = Url::parse(base_url.trim())
+        let mut url = Url::parse(self.endpoint(base_url.trim()).as_ref())
             .map_err(|_| ProviderError::Failed("Invalid Open-Meteo endpoint URL".into()))?;
         {
             let mut qp = url.query_pairs_mut();
@@ -410,25 +411,28 @@ impl OpenMeteoProvider {
             if current_uv.is_none() {
                 current_uv = c["uv_index"].as_f64();
             }
+            // Hourly values start at local midnight; keep them from the current hour on,
+            // aligned with their times (a null stays a gap).
             let h_aq = &v["hourly"];
-            let hourly_us_aqi = h_aq["us_aqi"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(Value::as_f64)
-                        .take(24)
-                        .map(|n| n.round().clamp(0.0, 500.0) as u16)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let hourly_pm2_5 = h_aq["pm2_5"]
-                .as_array()
-                .map(|arr| arr.iter().filter_map(Value::as_f64).take(24).collect())
-                .unwrap_or_default();
-            let hourly_uv = h_aq["uv_index"]
-                .as_array()
-                .map(|arr| arr.iter().filter_map(Value::as_f64).take(24).collect())
-                .unwrap_or_default();
+            let times = h_aq["time"].as_array().cloned().unwrap_or_default();
+            let hour = current_time.get(..13).unwrap_or(&current_time);
+            let start = times
+                .iter()
+                .position(|t| t.as_str().is_some_and(|t| t.get(..13).unwrap_or(t) >= hour))
+                .unwrap_or(0);
+            let hourly_start = times.get(start).and_then(Value::as_str).map(str::to_string);
+            let series = |key: &str| -> Vec<Option<f64>> {
+                h_aq[key]
+                    .as_array()
+                    .map(|arr| arr.iter().skip(start).take(24).map(Value::as_f64).collect())
+                    .unwrap_or_default()
+            };
+            let hourly_us_aqi = series("us_aqi")
+                .into_iter()
+                .map(|v| v.map(|n| n.round().clamp(0.0, 500.0) as u16))
+                .collect();
+            let hourly_pm2_5 = series("pm2_5");
+            let hourly_uv = series("uv_index");
 
             Some(AirQuality {
                 us_aqi: c["us_aqi"].as_f64().map(|n| n.round() as u16),
@@ -448,12 +452,14 @@ impl OpenMeteoProvider {
                 mugwort_pollen: c["mugwort_pollen"].as_f64(),
                 olive_pollen: c["olive_pollen"].as_f64(),
                 ragweed_pollen: c["ragweed_pollen"].as_f64(),
+                hourly_start,
                 hourly_us_aqi,
                 hourly_pm2_5,
                 hourly_uv,
             })
         });
 
+        let minutely_precip = Self::parse_minutely(forecast_val, &current_time);
         let current = CurrentWeather {
             time: current_time,
             temperature_c,
@@ -472,7 +478,6 @@ impl OpenMeteoProvider {
             uv_index: current_uv,
         };
 
-        let models = Self::build_model_series(&daily, &hourly, forecast_val);
 
         Ok(ForecastSnapshot {
             location: loc,
@@ -483,84 +488,137 @@ impl OpenMeteoProvider {
             daily,
             air_quality,
             alerts: Vec::new(),
-            models,
+            alerts_unavailable: false,
+            models: Vec::new(),
+            minutely_precip,
             attribution,
         })
     }
 
-    fn build_model_series(
+    /// The next two hours of 15-minute precipitation, from the step containing `current_time`.
+    fn parse_minutely(forecast_val: &Value, current_time: &str) -> Vec<(String, f64)> {
+        let m = &forecast_val["minutely_15"];
+        let (Some(times), Some(precip)) = (m["time"].as_array(), m["precipitation"].as_array()) else {
+            return Vec::new();
+        };
+        let pairs: Vec<(String, f64)> = times
+            .iter()
+            .zip(precip)
+            .filter_map(|(t, p)| Some((t.as_str()?.to_string(), p.as_f64()?)))
+            .collect();
+        // The step containing now is the last one that starts at or before it.
+        let start = pairs.iter().rposition(|(t, _)| t.as_str() <= current_time).unwrap_or(0);
+        pairs.into_iter().skip(start).take(9).collect()
+    }
+
+    /// Model comparison: the blended forecast already parsed, plus each model in
+    /// `models_val` (one request with `models=`, whose keys end in `_<model id>`). A model
+    /// the response lacks is left out; a missing value is NaN, not a guess.
+    pub fn build_model_series(
         daily: &[DailyForecast],
         hourly: &[HourlyForecast],
-        forecast_val: &Value,
+        models_val: Option<&Value>,
     ) -> Vec<crate::model::ModelSeries> {
-        let base_max: Vec<f64> = daily.iter().map(|d| d.temp_max_c).collect();
-        let base_min: Vec<f64> = daily.iter().map(|d| d.temp_min_c).collect();
-        let base_prec: Vec<f64> = daily.iter().map(|d| d.precipitation_sum_mm).collect();
-        let base_hourly: Vec<f64> = hourly.iter().take(48).map(|h| h.temperature_c).collect();
-
-        let extract_array = |obj: &Value, key: &str| -> Option<Vec<f64>> {
-            obj[key]
-                .as_array()
-                .map(|a| a.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
-                .filter(|v| !v.is_empty())
+        let mut out = Vec::new();
+        if daily.is_empty() {
+            return out;
+        }
+        out.push(crate::model::ModelSeries {
+            model_id: "best_match".into(),
+            model_name: "Open-Meteo Best Match".into(),
+            resolution: "Seamless blend".into(),
+            daily_max_c: daily.iter().map(|d| d.temp_max_c).collect(),
+            daily_min_c: daily.iter().map(|d| d.temp_min_c).collect(),
+            daily_precip_mm: daily.iter().map(|d| d.precipitation_sum_mm).collect(),
+            hourly_temp_c: hourly.iter().map(|h| h.temperature_c).collect(),
+        });
+        let Some(v) = models_val else { return out };
+        let values = |obj: &Value, key: &str| -> Option<Vec<f64>> {
+            let a = obj[key].as_array()?;
+            let vals: Vec<f64> = a.iter().map(|x| x.as_f64().unwrap_or(f64::NAN)).collect();
+            vals.iter().any(|x| x.is_finite()).then_some(vals)
         };
+        for (id, name, res) in MODELS {
+            let (d, h) = (&v["daily"], &v["hourly"]);
+            let (Some(max), Some(min)) = (
+                values(d, &format!("temperature_2m_max_{id}")),
+                values(d, &format!("temperature_2m_min_{id}")),
+            ) else {
+                continue;
+            };
+            out.push(crate::model::ModelSeries {
+                model_id: id.into(),
+                model_name: name.into(),
+                resolution: res.into(),
+                daily_max_c: max,
+                daily_min_c: min,
+                daily_precip_mm: values(d, &format!("precipitation_sum_{id}")).unwrap_or_default(),
+                hourly_temp_c: values(h, &format!("temperature_2m_{id}")).unwrap_or_default(),
+            });
+        }
+        out
+    }
 
-        let d_obj = &forecast_val["daily"];
-        let h_obj = &forecast_val["hourly"];
-
-        let specs = [
-            ("best_match", "Open-Meteo Best Match", "Seamless blend", 0.0, 0.0, 1.0),
-            ("ecmwf_ifs025", "ECMWF IFS", "0.25° (~25 km)", -0.4, -0.3, 0.92),
-            ("gfs_seamless", "NOAA GFS", "0.25° / HRRR", 0.5, 0.2, 1.08),
-            ("icon_seamless", "DWD ICON", "11 km / EU 7 km", -0.2, 0.4, 0.96),
-        ];
-
-        specs
-            .into_iter()
-            .map(|(id, name, res, d_hi, d_lo, p_scale)| {
-                let max_key = format!("temperature_2m_max_{id}");
-                let min_key = format!("temperature_2m_min_{id}");
-                let prec_key = format!("precipitation_sum_{id}");
-                let hr_key = format!("temperature_2m_{id}");
-
-                let daily_max_c = extract_array(d_obj, &max_key).unwrap_or_else(|| {
-                    base_max
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &v)| v + d_hi * ((i as f64 * 0.9 + 0.4).sin()))
-                        .collect()
-                });
-                let daily_min_c = extract_array(d_obj, &min_key).unwrap_or_else(|| {
-                    base_min
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &v)| v + d_lo * ((i as f64 * 1.1 + 0.2).cos()))
-                        .collect()
-                });
-                let daily_precip_mm = extract_array(d_obj, &prec_key).unwrap_or_else(|| {
-                    base_prec.iter().map(|&v| (v * p_scale).max(0.0)).collect()
-                });
-                let hourly_temp_c = extract_array(h_obj, &hr_key).unwrap_or_else(|| {
-                    base_hourly
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &v)| v + d_hi * ((i as f64 * 0.25).sin()))
-                        .collect()
-                });
-
-                crate::model::ModelSeries {
-                    model_id: id.into(),
-                    model_name: name.into(),
-                    resolution: res.into(),
-                    daily_max_c,
-                    daily_min_c,
-                    daily_precip_mm,
-                    hourly_temp_c,
+    /// Current wind, temperature and sea-level pressure at a `size`×`size` grid over
+    /// `bounds`, in one request.
+    pub fn fetch_field(&self, bounds: Bounds, size: usize) -> Result<FieldGrid, ProviderError> {
+        let coords = bounds.points(size);
+        let join = |f: fn(&(f64, f64)) -> f64| coords.iter().map(|c| format!("{:.3}", f(c))).collect::<Vec<_>>().join(",");
+        let v = self.get_json(
+            &self.config.forecast_url,
+            &[
+                ("latitude", join(|c| c.0)),
+                ("longitude", join(|c| c.1)),
+                ("current", "temperature_2m,pressure_msl,wind_speed_10m,wind_direction_10m".into()),
+                ("wind_speed_unit", "kmh".into()),
+            ],
+        )?;
+        // Several locations come back as an array, one object each, in request order.
+        let items = match &v {
+            Value::Array(a) => a.clone(),
+            other => vec![other.clone()],
+        };
+        if items.len() != coords.len() {
+            return Err(ProviderError::InvalidResponse);
+        }
+        let num = |c: &Value, k: &str| c[k].as_f64().unwrap_or(f64::NAN);
+        let points = coords
+            .iter()
+            .zip(&items)
+            .map(|(&(lat, lon), item)| {
+                let c = &item["current"];
+                FieldPoint {
+                    lat,
+                    lon,
+                    temperature_c: num(c, "temperature_2m"),
+                    pressure_hpa: num(c, "pressure_msl"),
+                    wind_speed_kmh: num(c, "wind_speed_10m"),
+                    wind_direction_deg: num(c, "wind_direction_10m"),
                 }
             })
-            .collect()
+            .collect();
+        Ok(FieldGrid { size, bounds, points, fetched_at: crate::model::now_unix() })
+    }
+
+    /// The forecast URL to use: Open-Meteo's customer host when an API key is set
+    /// and the URL is the free one.
+    fn endpoint<'a>(&self, url: &'a str) -> std::borrow::Cow<'a, str> {
+        let has_key = self.config.api_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+        match url.strip_prefix("https://") {
+            Some(rest) if has_key && rest.contains("api.open-meteo.com/") && !rest.starts_with("customer-") => {
+                format!("https://customer-{rest}").into()
+            }
+            _ => url.into(),
+        }
     }
 }
+
+/// The models compared with the blended forecast: (Open-Meteo id, name, resolution).
+const MODELS: [(&str, &str, &str); 3] = [
+    ("ecmwf_ifs025", "ECMWF IFS", "0.25° (~25 km)"),
+    ("gfs_seamless", "NOAA GFS", "0.25° / HRRR"),
+    ("icon_seamless", "DWD ICON", "11 km / EU 7 km"),
+];
 
 impl WeatherProvider for OpenMeteoProvider {
     fn id(&self) -> &'static str {
@@ -628,6 +686,7 @@ impl WeatherProvider for OpenMeteoProvider {
                     "daily",
                     "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,sunrise,sunset,daylight_duration,sunshine_duration,uv_index_max,precipitation_sum,precipitation_hours,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,shortwave_radiation_sum".into(),
                 ),
+                ("minutely_15", "precipitation".into()),
                 ("timezone", tz.to_string()),
                 ("forecast_days", "10".into()),
                 ("temperature_unit", "celsius".into()),
@@ -669,13 +728,31 @@ impl WeatherProvider for OpenMeteoProvider {
             self.attribution(),
         )?;
 
-        if self.config.fetch_us_noaa_alerts
-            && snapshot.location.is_us()
-            && let Ok(alerts) = NoaaAlertProvider::default().fetch_alerts(location.latitude, location.longitude)
-        {
-            snapshot.alerts = alerts;
+        // The same days and hours, from each compared model.
+        let models_val = self
+            .get_json(
+                &self.config.forecast_url,
+                &[
+                    ("latitude", format!("{:.4}", location.latitude)),
+                    ("longitude", format!("{:.4}", location.longitude)),
+                    ("daily", "temperature_2m_max,temperature_2m_min,precipitation_sum".into()),
+                    ("hourly", "temperature_2m".into()),
+                    ("models", MODELS.map(|m| m.0).join(",")),
+                    ("timezone", tz.to_string()),
+                    ("forecast_days", "10".into()),
+                ],
+            )
+            .ok();
+        snapshot.models = Self::build_model_series(&snapshot.daily, &snapshot.hourly, models_val.as_ref());
+
+        if self.config.fetch_us_noaa_alerts && snapshot.location.is_us() {
+            match NoaaAlertProvider::default().fetch_alerts(location.latitude, location.longitude) {
+                Ok(alerts) => snapshot.alerts = alerts,
+                Err(_) => snapshot.alerts_unavailable = true,
+            }
         }
 
+        snapshot.advance_to(now);
         Ok(snapshot)
     }
 }
@@ -822,6 +899,119 @@ mod tests {
         assert_eq!(snap.daily.len(), 2);
         assert_eq!(snap.daily[1].condition, WeatherCondition::Rain);
         assert_eq!(snap.air_quality.as_ref().unwrap().us_aqi, Some(34));
+    }
+
+    fn fixture() -> ForecastSnapshot {
+        let v_fc: Value = serde_json::from_str(SAMPLE_FORECAST_JSON).unwrap();
+        let loc = Location::new("Austin", None, None, Some("US".into()), 30.27, -97.74, None, None);
+        OpenMeteoProvider::parse_forecast_json(&loc, &v_fc, None, 0, OpenMeteoProvider::default().attribution()).unwrap()
+    }
+
+    /// Unix time of a local wall-clock time in the fixture's zone (UTC-5).
+    fn local(s: &str) -> i64 {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").unwrap().and_utc().timestamp() + 18_000
+    }
+
+    #[test]
+    fn advances_a_stale_snapshot() {
+        let mut snap = fixture();
+        snap.advance_to(local("2026-10-18T15:20"));
+        // 14:15's observation is replaced by 15:00's forecast, and past hours go.
+        assert_eq!(snap.hourly[0].time, "2026-10-18T15:00");
+        assert_eq!(snap.current.temperature_c, 25.0);
+        assert_eq!(snap.daily[0].date, "2026-10-18");
+
+        // The next day: yesterday goes; hours that are all past are kept rather than emptied.
+        snap.advance_to(local("2026-10-19T09:00"));
+        assert_eq!(snap.daily.len(), 1);
+        assert_eq!(snap.daily[0].date, "2026-10-19");
+        assert_eq!(snap.hourly.len(), 1);
+
+        // Nothing moves when the snapshot is current.
+        let mut fresh = fixture();
+        fresh.advance_to(local("2026-10-18T14:20"));
+        assert_eq!(fresh.hourly.len(), 2);
+        assert_eq!(fresh.current.temperature_c, 24.5);
+    }
+
+    #[test]
+    fn drops_expired_alerts() {
+        let mut snap = fixture();
+        let alert = |expires: Option<&str>| crate::model::WeatherAlert {
+            id: "a".into(),
+            event: "Wind Advisory".into(),
+            headline: String::new(),
+            description: String::new(),
+            instruction: None,
+            severity: crate::model::AlertSeverity::Moderate,
+            area: String::new(),
+            effective: None,
+            expires: expires.map(str::to_string),
+            sender: None,
+        };
+        snap.alerts = vec![alert(Some("2026-10-18T14:00:00-05:00")), alert(Some("2026-10-18T18:00:00-05:00")), alert(None)];
+        snap.advance_to(local("2026-10-18T15:00"));
+        assert_eq!(snap.alerts.len(), 2);
+    }
+
+    #[test]
+    fn nowcasts_rain() {
+        let mut snap = fixture();
+        let steps = |mm: &[f64]| mm.iter().enumerate().map(|(i, &m)| (format!("2026-10-18T14:{:02}", i * 15 % 60), m)).collect();
+        snap.minutely_precip = steps(&[0.0, 0.0, 0.4, 0.5]);
+        assert_eq!(snap.rain_nowcast().as_deref(), Some("Rain in 30 min"));
+        snap.minutely_precip = steps(&[0.3, 0.2, 0.0]);
+        assert_eq!(snap.rain_nowcast().as_deref(), Some("Rain stopping in 30 min"));
+        snap.minutely_precip = steps(&[0.0, 0.0]);
+        assert_eq!(snap.rain_nowcast(), None);
+    }
+
+    #[test]
+    fn compares_only_models_that_answered() {
+        let snap = fixture();
+        assert_eq!(OpenMeteoProvider::build_model_series(&snap.daily, &snap.hourly, None).len(), 1);
+        let models = serde_json::json!({
+            "daily": {
+                "temperature_2m_max_gfs_seamless": [26.0, null],
+                "temperature_2m_min_gfs_seamless": [15.0, 13.0]
+            },
+            "hourly": {}
+        });
+        let series = OpenMeteoProvider::build_model_series(&snap.daily, &snap.hourly, Some(&models));
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[1].model_id, "gfs_seamless");
+        assert!(series[1].daily_max_c[1].is_nan());
+    }
+
+    #[test]
+    fn aligns_air_quality_hours_with_now() {
+        let v_fc: Value = serde_json::from_str(SAMPLE_FORECAST_JSON).unwrap();
+        let aq = serde_json::json!({
+            "current": {"us_aqi": 30},
+            "hourly": {
+                "time": ["2026-10-18T13:00", "2026-10-18T14:00", "2026-10-18T15:00"],
+                "us_aqi": [10, null, 30],
+                "pm2_5": [1.0, 2.0, 3.0]
+            }
+        });
+        let loc = Location::new("Austin", None, None, Some("US".into()), 30.27, -97.74, None, None);
+        let snap = OpenMeteoProvider::parse_forecast_json(&loc, &v_fc, Some(&aq), 0, OpenMeteoProvider::default().attribution()).unwrap();
+        let aq = snap.air_quality.unwrap();
+        assert_eq!(aq.hourly_start.as_deref(), Some("2026-10-18T14:00"));
+        assert_eq!(aq.hourly_us_aqi, vec![None, Some(30)]);
+        assert_eq!(aq.hourly_pm2_5, vec![Some(2.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn uses_the_customer_host_with_a_key() {
+        let keyed = OpenMeteoProvider::new(OpenMeteoConfig { api_key: Some("k".into()), ..Default::default() });
+        assert_eq!(keyed.endpoint(DEFAULT_FORECAST_URL), "https://customer-api.open-meteo.com/v1/forecast");
+        assert_eq!(
+            keyed.endpoint(DEFAULT_AIR_QUALITY_URL),
+            "https://customer-air-quality-api.open-meteo.com/v1/air-quality"
+        );
+        assert_eq!(keyed.endpoint("https://meteo.example.com/v1/forecast"), "https://meteo.example.com/v1/forecast");
+        assert_eq!(OpenMeteoProvider::default().endpoint(DEFAULT_FORECAST_URL), DEFAULT_FORECAST_URL);
     }
 
     #[test]

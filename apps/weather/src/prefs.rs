@@ -3,7 +3,8 @@
 pub use nixe_theme::ThemeMode;
 
 use nixe_weather_core::{
-    Location, OpenMeteoConfig, PrecipitationUnit, TemperatureUnit, UnitPrefs, WindSpeedUnit,
+    DistanceUnit, Location, OpenMeteoConfig, PrecipitationUnit, PressureUnit, TemperatureUnit,
+    UnitPrefs, WindSpeedUnit,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,11 +17,13 @@ pub struct Prefs {
     pub reduce_motion: bool,
     pub sidebar_collapsed: bool,
     pub last_section: String,
-    /// When true, adds a Hyprland floating window rule (`480×740`) and floats the window.
+    /// When true, adds a Hyprland floating window rule (`460×720`) and floats the window.
     pub float_window: bool,
     pub temperature_unit: TemperatureUnit,
     pub wind_speed_unit: WindSpeedUnit,
     pub precipitation_unit: PrecipitationUnit,
+    pub pressure_unit: PressureUnit,
+    pub distance_unit: DistanceUnit,
     pub use_24h_time: bool,
     /// Default layer on the Radar & Overlays page (`"radar"`, `"satellite"`, `"wind"`, `"temp"`).
     pub default_radar_layer: String,
@@ -34,6 +37,10 @@ pub struct Prefs {
     pub saved_locations: Vec<Location>,
     /// Fetch active US severe-weather alerts from NOAA/NWS.
     pub us_noaa_alerts: bool,
+    /// Send a desktop notification for each new Severe or Extreme alert.
+    pub notify_alerts: bool,
+    /// Alerts already notified (their ids, newest last).
+    pub notified_alerts: Vec<String>,
     /// Whether this installation is used commercially (requires API key or self-hosted URL).
     pub commercial_use: bool,
     /// Optional Open-Meteo commercial API key.
@@ -46,8 +53,17 @@ pub struct Prefs {
     pub custom_geocoding_url: String,
 }
 
+/// True when the locale measures in US customary units (the US, Liberia, Myanmar).
+fn us_customary() -> bool {
+    ["LC_ALL", "LC_MEASUREMENT", "LANG"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .is_none_or(|v| ["_US", "_LR", "_MM"].iter().any(|c| v.contains(c)))
+}
+
 impl Default for Prefs {
     fn default() -> Self {
+        let us = us_customary();
         let default_loc = Location::new(
             "New York",
             Some("New York".into()),
@@ -66,16 +82,20 @@ impl Default for Prefs {
             sidebar_collapsed: false,
             last_section: "overview".into(),
             float_window: false,
-            temperature_unit: TemperatureUnit::Fahrenheit,
-            wind_speed_unit: WindSpeedUnit::Mph,
-            precipitation_unit: PrecipitationUnit::Inches,
-            use_24h_time: false,
+            temperature_unit: if us { TemperatureUnit::Fahrenheit } else { TemperatureUnit::Celsius },
+            wind_speed_unit: if us { WindSpeedUnit::Mph } else { WindSpeedUnit::Kmh },
+            precipitation_unit: if us { PrecipitationUnit::Inches } else { PrecipitationUnit::Millimeters },
+            pressure_unit: if us { PressureUnit::Inhg } else { PressureUnit::Hpa },
+            distance_unit: if us { DistanceUnit::Miles } else { DistanceUnit::Kilometers },
+            use_24h_time: !us,
             default_radar_layer: "radar".into(),
             radar_opacity_pct: 80,
             refresh_interval_mins: 30,
             active_location_id: default_loc.id.clone(),
             saved_locations: vec![default_loc],
             us_noaa_alerts: true,
+            notify_alerts: true,
+            notified_alerts: Vec::new(),
             commercial_use: false,
             open_meteo_api_key: String::new(),
             custom_forecast_url: String::new(),
@@ -91,6 +111,8 @@ impl Prefs {
             temperature: self.temperature_unit,
             wind_speed: self.wind_speed_unit,
             precipitation: self.precipitation_unit,
+            pressure: self.pressure_unit,
+            distance: self.distance_unit,
             use_24h_time: self.use_24h_time,
         }
     }

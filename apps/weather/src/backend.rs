@@ -2,7 +2,7 @@
 
 use crate::paths;
 use nixe_weather_core::{
-    Cache, ForecastSnapshot, Location, OpenMeteoConfig, OpenMeteoProvider, ProviderError,
+    Bounds, Cache, FIELD_SIZE, FieldGrid, ForecastSnapshot, Location, OpenMeteoConfig, OpenMeteoProvider, ProviderError,
     RadarClient, RadarFrame, RadarLayerKind, RadarManifest, TileGridPayload, WeatherProvider,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,10 +37,43 @@ pub fn human_age(fetched_at: i64) -> String {
     }
 }
 
+thread_local! {
+    /// This thread's connection to the cache, opened (and migrated) once. The GTK
+    /// thread only reads through it; WAL keeps those reads from waiting on writers.
+    static CACHE: std::cell::RefCell<Option<Cache>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with this thread's cache connection, opening it first if needed.
+fn with_cache<T>(f: impl FnOnce(&mut Cache) -> T) -> Option<T> {
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Cache::open(&paths::cache_db()).ok();
+        }
+        c.as_mut().map(f)
+    })
+}
+
 /// Read cached snapshot immediately without touching the network.
 pub fn get_cached(location_id: &str) -> Option<ForecastSnapshot> {
-    let cache = Cache::open(&paths::cache_db()).ok()?;
-    cache.get_forecast(location_id).ok().flatten()
+    with_cache(|c| match c.get_forecast(location_id) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("nixe-weather: cached forecast for {location_id}: {e:#}");
+            None
+        }
+    })
+    .flatten()
+}
+
+/// Forget cached forecasts of locations no longer saved, on a worker.
+pub fn prune_forecasts(keep: Vec<String>) {
+    std::thread::spawn(move || {
+        with_cache(|c| {
+            let ids: Vec<&str> = keep.iter().map(String::as_str).collect();
+            let _ = c.retain_forecasts(&ids);
+        });
+    });
 }
 
 /// Load a fresh cached forecast or fetch from Open-Meteo on a worker thread,
@@ -52,15 +85,9 @@ pub fn load_or_fetch(
     force_refresh: bool,
 ) -> FetchOutcome {
     let now = now_epoch();
-    let db_path = paths::cache_db();
-    let mut cache = Cache::open(&db_path).ok();
-
-    let cached_snapshot = cache
-        .as_ref()
-        .and_then(|c| c.get_forecast(&location.id).ok().flatten());
-    let is_stale = cache
-        .as_ref()
-        .and_then(|c| c.is_stale(&location.id, max_age_secs, now).ok())
+    let cached_snapshot = get_cached(&location.id);
+    let is_stale = with_cache(|c| c.is_stale(&location.id, max_age_secs, now).ok())
+        .flatten()
         .unwrap_or(true);
 
     if !force_refresh
@@ -77,9 +104,7 @@ pub fn load_or_fetch(
     let provider = OpenMeteoProvider::new(config.clone());
     match provider.fetch_forecast(location) {
         Ok(fresh) => {
-            if let Some(c) = cache.as_mut() {
-                let _ = c.put_forecast(&fresh);
-            }
+            with_cache(|c| c.put_forecast(&fresh));
             FetchOutcome {
                 snapshot: Some(fresh),
                 stale_fallback: false,
@@ -104,12 +129,7 @@ pub fn search_locations(
         return Ok(Vec::new());
     }
     let now = now_epoch();
-    let db_path = paths::cache_db();
-    let mut cache = Cache::open(&db_path).ok();
-
-    if let Some(cached) = cache
-        .as_ref()
-        .and_then(|c| c.get_geocoding(q, GEOCODING_TTL_SECS, now).ok().flatten())
+    if let Some(cached) = with_cache(|c| c.get_geocoding(q, GEOCODING_TTL_SECS, now).ok().flatten()).flatten()
         && !cached.is_empty()
     {
         return Ok(cached);
@@ -117,9 +137,7 @@ pub fn search_locations(
 
     let provider = OpenMeteoProvider::new(config.clone());
     let results = provider.search_locations(q, 8)?;
-    if let Some(c) = cache.as_mut() {
-        let _ = c.put_geocoding(q, &results, now);
-    }
+    with_cache(|c| c.put_geocoding(q, &results, now));
     Ok(results)
 }
 
@@ -159,14 +177,13 @@ pub fn get_cached_radar_grid(
     frame: Option<&RadarFrame>,
     layer: RadarLayerKind,
 ) -> Option<TileGridPayload> {
-    let cache = Cache::open(&paths::cache_db()).ok()?;
-    RadarClient::get_cached_grid(lat, lon, z, host, frame, layer, &cache)
+    with_cache(|c| RadarClient::get_cached_grid(lat, lon, z, host, frame, layer, c)).flatten()
 }
 
 /// Fetch only the 3×3 background basemap tiles (cached in SQLite, parallel HTTP on cache miss).
 pub fn fetch_basemap_grid(lat: f64, lon: f64, z: u8) -> TileGridPayload {
-    let mut cache = Cache::open(&paths::cache_db()).ok();
-    radar_client().fetch_basemap_grid(lat, lon, z, cache.as_mut())
+    with_cache(|c| radar_client().fetch_basemap_grid(lat, lon, z, Some(c)))
+        .unwrap_or_else(|| radar_client().fetch_basemap_grid(lat, lon, z, None))
 }
 
 /// Fetch only the 3×3 radar/satellite overlay tiles in parallel.
@@ -178,8 +195,8 @@ pub fn fetch_overlay_tiles(
     frame: Option<&RadarFrame>,
     layer: RadarLayerKind,
 ) -> Vec<Option<Vec<u8>>> {
-    let mut cache = Cache::open(&paths::cache_db()).ok();
-    radar_client().fetch_overlay_tiles(lat, lon, z, host, frame, layer, cache.as_mut())
+    with_cache(|c| radar_client().fetch_overlay_tiles(lat, lon, z, host, frame, layer, Some(c)))
+        .unwrap_or_else(|| radar_client().fetch_overlay_tiles(lat, lon, z, host, frame, layer, None))
 }
 
 /// Pre-warm the Z6 basemap and latest radar frame in a background thread so opening Radar is instant.
@@ -199,4 +216,18 @@ pub fn prewarm_radar(lat: f64, lon: f64) {
             );
         }
     });
+}
+
+/// Wind, temperature and pressure over the 3×3 tile map around (`lat`, `lon`) at zoom
+/// `z`: from the cache when under 30 minutes old, otherwise from Open-Meteo.
+pub fn fetch_field(lat: f64, lon: f64, z: u8, config: &OpenMeteoConfig) -> Result<FieldGrid, ProviderError> {
+    let center = nixe_weather_core::lat_lon_to_tile(lat, lon, z);
+    let key = format!("{}/{}/{}", center.z, center.x, center.y);
+    let now = now_epoch();
+    if let Some(grid) = with_cache(|c| c.get_field(&key, 30 * 60, now).ok().flatten()).flatten() {
+        return Ok(grid);
+    }
+    let grid = OpenMeteoProvider::new(config.clone()).fetch_field(Bounds::of_tile_grid(center), FIELD_SIZE)?;
+    with_cache(|c| c.put_field(&key, &grid));
+    Ok(grid)
 }

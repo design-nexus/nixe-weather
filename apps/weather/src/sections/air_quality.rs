@@ -12,46 +12,50 @@ pub fn build(
     page: &Page,
     snap: Option<&ForecastSnapshot>,
     _stale_fallback: bool,
-    _last_error: Option<&str>,
+    last_error: Option<&str>,
 ) {
     let Some(snap) = snap else {
+        super::no_forecast(page, "Air quality & pollen", "weather-fog-symbolic", "Loading air quality & pollen…", "Atmospheric composition, particulates and pollen counts will appear once loaded.", last_error);
+        return;
+    };
+
+    let Some(aq) = snap.air_quality.clone() else {
         let g = page.group("Air quality & pollen");
         g.add(&widgets::empty_state(
             "weather-fog-symbolic",
-            "Loading air quality & pollen…",
-            "Atmospheric composition, particulates and pollen counts will appear once loaded.",
+            "Air quality unavailable",
+            "The air-quality service didn't answer. It's asked again on the next refresh.",
             None,
         ));
         return;
     };
 
-    let aq = snap.air_quality.clone().unwrap_or_default();
-    let us_aqi = aq.us_aqi.unwrap_or(0);
-    let eu_aqi = aq.european_aqi.unwrap_or(0);
-
     // 1. Air Quality Summary Hero & Health Guidance
     let g_summary = page.group("Air quality index (AQI)");
-    let advice = match us_aqi {
-        0..=50 => "Air quality is satisfactory, and air pollution poses little or no risk.",
-        51..=100 => "Air quality is acceptable. Unusually sensitive individuals should consider limiting prolonged outdoor exertion.",
-        101..=150 => "Members of sensitive groups may experience health effects. The general public is less likely to be affected.",
-        151..=200 => "Everyone may begin to experience health effects; sensitive groups may experience more serious effects.",
-        _ => "Health alert: outdoor exertion should be avoided.",
+    let advice = match aq.us_aqi {
+        None => "No current reading.",
+        Some(0..=50) => "Air quality is satisfactory, and air pollution poses little or no risk.",
+        Some(51..=100) => "Air quality is acceptable. Unusually sensitive individuals should consider limiting prolonged outdoor exertion.",
+        Some(101..=150) => "Members of sensitive groups may experience health effects. The general public is less likely to be affected.",
+        Some(151..=200) => "Everyone may begin to experience health effects; sensitive groups may experience more serious effects.",
+        Some(_) => "Health alert: outdoor exertion should be avoided.",
     };
     g_summary.note(advice);
 
-    let aqi_tag_class = match us_aqi {
-        0..=50 => "good",
-        51..=100 => "moderate",
-        101..=150 => "elevated",
-        _ => "danger",
-    };
     let aqi_right = widgets::hbox(8);
-    aqi_right.append(&widgets::tag(us_aqi_category(us_aqi), aqi_tag_class));
+    if let Some(us_aqi) = aq.us_aqi {
+        let aqi_tag_class = match us_aqi {
+            0..=50 => "good",
+            51..=100 => "moderate",
+            101..=150 => "elevated",
+            _ => "danger",
+        };
+        aqi_right.append(&widgets::tag(us_aqi_category(us_aqi), aqi_tag_class));
+    }
     aqi_right.append(&widgets::label(
         &aq.us_aqi
             .map(|v| format!("{v} AQI"))
-            .unwrap_or_else(|| "–".into()),
+            .unwrap_or_else(|| "Unavailable".into()),
         "mono",
     ));
 
@@ -66,8 +70,8 @@ pub fn build(
         Some(
             widgets::label(
                 &aq.european_aqi
-                    .map(|_| format!("{eu_aqi} EAQI"))
-                    .unwrap_or_else(|| "–".into()),
+                    .map(|v| format!("{v} EAQI"))
+                    .unwrap_or_else(|| "Unavailable".into()),
                 "mono",
             )
             .upcast_ref(),
@@ -75,11 +79,25 @@ pub fn build(
     ));
 
     // 2. 24-Hour US AQI & PM2.5 Cairo Trend Graph
-    if aq.hourly_us_aqi.len() >= 4 {
+    if aq.hourly_us_aqi.iter().flatten().count() >= 4 {
         let g_trend = page.group("24-hour air quality trend");
-        let aqi_f: Vec<f64> = aq.hourly_us_aqi.iter().map(|&v| v as f64).collect();
-        let pm25_f: Vec<f64> = aq.hourly_pm2_5.clone();
-        let labels: Vec<String> = (0..aqi_f.len()).map(|i| format!("+{i}h")).collect();
+        let gap = |v: Option<f64>| v.unwrap_or(f64::NAN);
+        let aqi_f: Vec<f64> = aq.hourly_us_aqi.iter().map(|v| gap(v.map(f64::from))).collect();
+        let pm25_f: Vec<f64> = aq.hourly_pm2_5.iter().map(|&v| gap(v)).collect();
+        let start = aq
+            .hourly_start
+            .as_deref()
+            .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").ok());
+        let use_24h = crate::prefs::get().use_24h_time;
+        let labels: Vec<String> = (0..aqi_f.len())
+            .map(|i| match start {
+                Some(t) => {
+                    let t = t + chrono::Duration::hours(i as i64);
+                    if use_24h { t.format("%H:%M").to_string() } else { t.format("%-I %p").to_string() }
+                }
+                None => format!("+{i}h"),
+            })
+            .collect();
         let chart = charts::line_chart(
             vec![
                 ChartSeries {
@@ -176,7 +194,7 @@ pub fn build(
 
     // 4. Pollen & Allergens
     let g_pollen = page.group("Pollen & allergens");
-    g_pollen.note("Airborne pollen concentration in grains/m³ (seasonal regional availability).");
+    g_pollen.note("Airborne pollen in grains/m³. Open-Meteo forecasts pollen for Europe only, during each species' season.");
     for (species, kind_desc, val_opt) in [
         ("Grass pollen", "Poaceae meadow and turf grasses", aq.grass_pollen),
         ("Birch pollen", "Betula tree pollen", aq.birch_pollen),
@@ -197,20 +215,14 @@ pub fn build(
             right.append(&widgets::tag(pollen_category(v), p_class));
             right.append(&widgets::label(&format!("{v:.0} grains/m³"), "mono"));
         } else {
-            right.append(&widgets::tag("Off-season", "good"));
+            right.append(&widgets::label("Not forecast here", "dim"));
         }
         g_pollen.add(&widgets::row(species, kind_desc, Some(right.upcast_ref())));
     }
 
     // 5. UV Index & Clear-Sky Irradiance
     let g_uv = page.group("UV radiation & solar exposure");
-    let cur_uv = snap.current.uv_index.unwrap_or(0.0);
-    let clear_uv = aq.uv_index_clear_sky.unwrap_or(cur_uv);
-    let max_uv = snap
-        .daily
-        .first()
-        .and_then(|d| d.uv_index_max)
-        .unwrap_or(cur_uv);
+    let max_uv = snap.daily.first().and_then(|d| d.uv_index_max);
 
     let uv_tag_class = |u: f64| {
         if u < 3.0 {
@@ -224,25 +236,30 @@ pub fn build(
         }
     };
 
-    let cur_uv_right = widgets::hbox(8);
-    cur_uv_right.append(&widgets::tag(uv_category(cur_uv), uv_tag_class(cur_uv)));
-    cur_uv_right.append(&widgets::label(&format!("{cur_uv:.1}"), "mono"));
+    let uv_value = |uv: Option<f64>| -> gtk::Widget {
+        let right = widgets::hbox(8);
+        match uv {
+            Some(u) => {
+                right.append(&widgets::tag(uv_category(u), uv_tag_class(u)));
+                right.append(&widgets::label(&format!("{u:.1}"), "mono"));
+            }
+            None => right.append(&widgets::label("Unavailable", "mono")),
+        }
+        right.upcast()
+    };
     g_uv.add(&widgets::row(
         "Current UV index",
         "Live surface ultraviolet index.",
-        Some(cur_uv_right.upcast_ref()),
+        Some(&uv_value(snap.current.uv_index)),
     ));
     g_uv.add(&widgets::row(
         "Clear-sky UV potential",
         "Unattenuated UV index without cloud cover.",
-        Some(widgets::label(&format!("{clear_uv:.1} ({})", uv_category(clear_uv)), "mono").upcast_ref()),
+        Some(&uv_value(aq.uv_index_clear_sky)),
     ));
-    let max_uv_right = widgets::hbox(8);
-    max_uv_right.append(&widgets::tag(uv_category(max_uv), uv_tag_class(max_uv)));
-    max_uv_right.append(&widgets::label(&format!("{max_uv:.1}"), "mono"));
     g_uv.add(&widgets::row(
         "Today's peak UV index",
         "Forecasted solar noon maximum.",
-        Some(max_uv_right.upcast_ref()),
+        Some(&uv_value(max_uv)),
     ));
 }

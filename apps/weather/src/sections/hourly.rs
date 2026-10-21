@@ -12,16 +12,10 @@ pub fn build(
     page: &Page,
     snap: Option<&ForecastSnapshot>,
     _stale_fallback: bool,
-    _last_error: Option<&str>,
+    last_error: Option<&str>,
 ) {
     let Some(snap) = snap else {
-        let g = page.group("Hourly & graphs");
-        g.add(&widgets::empty_state(
-            "view-continuous-symbolic",
-            "Loading hourly telemetry…",
-            "48-hour forecast curves will appear as soon as forecast data arrives.",
-            None,
-        ));
+        super::no_forecast(page, "Hourly & graphs", "view-continuous-symbolic", "Loading hourly telemetry…", "48-hour forecast curves will appear as soon as forecast data arrives.", last_error);
         return;
     };
 
@@ -120,8 +114,8 @@ pub fn build(
     );
     g_wind.add(&wind_chart);
 
-    // 3. Humidity, Cloud Cover & Surface Pressure Chart
-    let g_atm = page.group("Humidity, cloud cover & surface pressure");
+    // 3. Humidity & Cloud Cover Chart
+    let g_atm = page.group("Humidity & cloud cover (48 hours)");
     let hum_vals: Vec<f64> = hours
         .iter()
         .map(|h| h.humidity_pct.unwrap_or(0) as f64)
@@ -145,7 +139,7 @@ pub fn build(
                 tone: 4,
             },
         ],
-        x_labels,
+        x_labels.clone(),
         "%".into(),
         Some((0.0, 100.0)),
         None,
@@ -153,9 +147,33 @@ pub fn build(
     );
     g_atm.add(&atm_chart);
 
-    // 4. Detailed 48-hour meteorological table
+    // 4. Surface Pressure Chart
+    let pres_vals: Vec<f64> = hours
+        .iter()
+        .map(|h| h.pressure_hpa.map(|p| units.pressure.convert(p)).unwrap_or(f64::NAN))
+        .collect();
+    if pres_vals.iter().any(|v| v.is_finite()) {
+        let g_pres = page.group("Surface pressure (48 hours)");
+        g_pres.add(&charts::line_chart(
+            vec![ChartSeries {
+                label: format!("Pressure ({})", units.pressure.symbol()),
+                values: pres_vals,
+                dashed: false,
+                tone: 2,
+            }],
+            x_labels,
+            String::new(),
+            None,
+            None,
+            160,
+        ));
+    }
+
+    // 5. Detailed 48-hour table
     let g_table = page.group("Hour-by-hour breakdown");
-    g_table.note("Every 2 hours over the next 48 hours: temperature, dew point, precipitation, wind gusts, pressure and solar irradiance.");
+    g_table.note("Hourly for 12 hours, then every 2 hours: conditions, temperature (feels like), precipitation, wind and pressure.");
+    // A floating 460 px window drops the condition name and pressure columns.
+    let narrow = crate::window::is_narrow();
     for (idx, h) in hours.iter().enumerate() {
         if idx > 12 && idx % 2 != 0 {
             continue;
@@ -179,10 +197,12 @@ pub fn build(
         icon.add_css_class(crate::theme::condition_color_class(h.condition, h.is_day));
         row.append(&icon);
 
-        let cond = widgets::label(h.condition.label(), "");
-        cond.set_width_chars(14);
-        cond.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        row.append(&cond);
+        if !narrow {
+            let cond = widgets::label(h.condition.label(), "");
+            cond.set_width_chars(14);
+            cond.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            row.append(&cond);
+        }
 
         let temp = widgets::label(
             &format!(
@@ -207,7 +227,7 @@ pub fn build(
             },
             "daily-pop",
         );
-        pop.set_width_chars(12);
+        pop.set_width_chars(if narrow { 9 } else { 12 });
         row.append(&pop);
 
         let wdir = h
@@ -222,14 +242,16 @@ pub fn build(
         wind.set_xalign(1.0);
         row.append(&wind);
 
-        let pres_txt = h
-            .pressure_hpa
-            .map(|p| format!("{p:.0} hPa"))
-            .unwrap_or_else(|| "–".into());
-        let pres = widgets::label(&pres_txt, "dim");
-        pres.set_width_chars(9);
-        pres.set_xalign(1.0);
-        row.append(&pres);
+        if !narrow {
+            let pres_txt = h
+                .pressure_hpa
+                .map(|p| units.pressure.format(p))
+                .unwrap_or_else(|| "–".into());
+            let pres = widgets::label(&pres_txt, "dim");
+            pres.set_width_chars(10);
+            pres.set_xalign(1.0);
+            row.append(&pres);
+        }
 
         g_table.add(&row);
     }

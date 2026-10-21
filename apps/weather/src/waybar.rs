@@ -23,6 +23,10 @@ pub fn print_waybar_json(refresh_if_stale: bool) {
 
     let max_age = (p.refresh_interval_mins.max(5) as i64) * 60;
     let outcome = if refresh_if_stale {
+        // Several bars (one per monitor) poll at once; the first fetches while the
+        // others wait, then find the cache fresh.
+        let lock = std::fs::File::create(crate::paths::cache_db().with_extension("waybar.lock")).ok();
+        let _held = lock.as_ref().map(|f| f.lock());
         backend::load_or_fetch(&loc, &p.open_meteo_config(), max_age, false)
     } else {
         let snap = backend::get_cached(&loc.id);
@@ -46,12 +50,17 @@ pub fn print_waybar_json(refresh_if_stale: bool) {
             let out = json!({
                 "text": format!("☁ {}", loc.name),
                 "alt": "offline",
-                "tooltip": format!("{} — {err_msg}\nClick to open Weather", loc.display_name()),
+                "tooltip": format!("{} — {err_msg}\nClick to open Weather", esc(&loc.display_name())),
                 "class": "offline"
             });
             println!("{out}");
         }
     }
+}
+
+/// Waybar reads `text` and `tooltip` as Pango markup.
+fn esc(s: &str) -> String {
+    gtk::glib::markup_escape_text(s).to_string()
 }
 
 pub fn format_waybar_payload(
@@ -80,7 +89,7 @@ pub fn format_waybar_payload(
 
     let mut tooltip = format!(
         "{} — {}\nTemperature: {} (Feels like {})\nHigh: {} · Low: {}\nWind: {} {wind_dir} · Humidity: {}%",
-        snap.location.display_name(),
+        esc(&snap.location.display_name()),
         cur.condition.label(),
         units.temperature.format_with_unit(cur.temperature_c),
         units.temperature.format(cur.apparent_temperature_c),
@@ -90,8 +99,13 @@ pub fn format_waybar_payload(
         cur.humidity_pct
     );
 
+    if let Some(rain) = snap.rain_nowcast() {
+        tooltip.push_str(&format!("\n☂ {rain}"));
+    }
     if let Some(alert) = snap.alerts.first() {
-        tooltip.push_str(&format!("\n⚠ {}: {}", alert.severity.label(), alert.event));
+        tooltip.push_str(&format!("\n⚠ {}: {}", alert.severity.label(), esc(&alert.event)));
+    } else if snap.alerts_unavailable {
+        tooltip.push_str("\nAlerts unavailable");
     }
     tooltip.push_str(&format!("\n{status} · {}", snap.attribution.provider_name));
 
@@ -187,7 +201,9 @@ mod tests {
             }],
             air_quality: None,
             alerts: vec![],
+            alerts_unavailable: false,
             models: vec![],
+            minutely_precip: vec![],
             attribution: ProviderAttribution {
                 provider_id: "open-meteo".into(),
                 provider_name: "Open-Meteo".into(),
@@ -197,7 +213,11 @@ mod tests {
                 commercial_use_allowed: false,
             },
         };
-        let p = prefs::Prefs::default(); // Fahrenheit, mph
+        let p = prefs::Prefs {
+            temperature_unit: nixe_weather_core::TemperatureUnit::Fahrenheit,
+            wind_speed_unit: nixe_weather_core::WindSpeedUnit::Mph,
+            ..Default::default()
+        };
         let out = format_waybar_payload(&snap, &p, false);
         assert_eq!(out["text"], "☀ 68°");
         assert_eq!(out["class"], "clear-day");

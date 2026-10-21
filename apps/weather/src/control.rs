@@ -142,10 +142,13 @@ pub fn handle(name: &str, args: Value, reply: Reply) {
                 reply(Err("query is required".into()));
                 return;
             };
-            let intent = parse_query(&raw).unwrap_or(nixe_weather_core::QueryIntent {
-                rain_focus: false,
-                day: nixe_weather_core::query::TargetDay::Today,
-                location_query: None,
+            // A bare place name ("Seattle") is a question about its weather.
+            let intent = parse_query(&raw).unwrap_or_else(|| {
+                parse_query(&format!("weather {raw}")).unwrap_or(nixe_weather_core::QueryIntent {
+                    rain_focus: false,
+                    day: nixe_weather_core::query::TargetDay::Today,
+                    location_query: None,
+                })
             });
             let p = prefs::get();
             let cfg = p.open_meteo_config();
