@@ -36,7 +36,7 @@ you save, in a GTK 4 window.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/design-nexus/nixe/main/install.sh | bash -s -- weather
+curl -fsSL https://raw.githubusercontent.com/design-nexus/nixe-weather/main/install.sh | bash -s -- weather
 ```
 
 This builds with Cargo and installs `nixe-weather` to `~/.local/bin` with a launcher
