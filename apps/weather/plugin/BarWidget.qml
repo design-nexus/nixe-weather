@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell.Io
 import qs.Ui
 
-// The current conditions and temperature (from `nixe-weather --waybar`, which reads the
+// The current conditions and temperature (from `nyx-weather --waybar`, which reads the
 // forecast cache and refreshes it when stale); click toggles Weather, right-click opens
 // its settings.
 BarWidget {
@@ -22,14 +22,14 @@ BarWidget {
     horizontalMargin: 7.5
     onPressed: function(button) {
       if (!root.bar) return
-      if (button === Qt.RightButton) root.bar.run("nixe-weather --section settings")
-      else root.bar.run("nixe-weather --toggle")
+      if (button === Qt.RightButton) root.bar.run("nyx-weather --section settings")
+      else root.bar.run("nyx-weather --toggle")
     }
   }
 
   Process {
     id: poll
-    command: ["nixe-weather", "--waybar"]
+    command: ["nyx-weather", "--waybar"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

@@ -2,7 +2,7 @@
   "application": "weather",
   "directory": "weather",
   "packages": [
-    "nixe-weather"
+    "nyx-weather"
   ],
   "manifest": "Cargo.toml",
   "prepare": [],
@@ -13,9 +13,9 @@
       "test",
       "--locked",
       "-p",
-      "nixe-weather",
+      "nyx-weather",
       "--bin",
-      "nixe-weather"
+      "nyx-weather"
     ]
   ]
 }

@@ -6,7 +6,7 @@ use crate::widgets::{self, Page};
 use crate::{backend, prefs, window};
 use gtk::glib;
 use gtk::prelude::*;
-use nixe_weather_core::{
+use nyx_weather_core::{
     ForecastSnapshot, beaufort_scale, cardinal_direction, us_aqi_category, uv_category,
 };
 
@@ -548,7 +548,7 @@ fn expandable_detail_row(
 
 /// A severe-weather alert: a warning banner with its event and headline, and its
 /// description, instructions, area and times behind a toggle.
-fn alert_banner(alert: &nixe_weather_core::WeatherAlert, use_24h: bool) -> gtk::Box {
+fn alert_banner(alert: &nyx_weather_core::WeatherAlert, use_24h: bool) -> gtk::Box {
     let banner = widgets::banner("", true);
     banner.add_css_class("alert-banner");
     // The shared banner is icon + label; put a column of our own in the label's place.

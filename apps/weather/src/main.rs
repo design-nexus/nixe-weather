@@ -1,4 +1,4 @@
-//! Weather — native desktop weather application for Omarchy and the Nixe suite.
+//! Weather — native desktop weather application for Omarchy and the Nyx suite.
 
 mod backend;
 mod charts;
@@ -17,9 +17,9 @@ mod window;
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
-pub const APP_ID: &str = "io.github.design_nexus.nixe.Weather";
+pub const APP_ID: &str = "io.github.design_nexus.nyx.Weather";
 
-const USAGE: &str = "Usage: nixe-weather [OPTIONS]\n\
+const USAGE: &str = "Usage: nyx-weather [OPTIONS]\n\
 \n\
   --toggle            close the window if it's open, otherwise open it\n\
   --location NAME     switch to or search for NAME on open\n\
@@ -29,8 +29,8 @@ const USAGE: &str = "Usage: nixe-weather [OPTIONS]\n\
   --refresh           refresh all saved locations in the SQLite cache and exit\n";
 
 fn main() -> glib::ExitCode {
-    nixe_core::app::init(nixe_core::app::App {
-        slug: "nixe-weather",
+    nyx_core::app::init(nyx_core::app::App {
+        slug: "nyx-weather",
         name: "Weather",
     });
 
@@ -70,7 +70,7 @@ fn main() -> glib::ExitCode {
         .build();
 
     app.connect_startup(|app| {
-        nixe_core::control::serve_async(app, control::tools(), control::handle);
+        nyx_core::control::serve_async(app, control::tools(), control::handle);
     });
 
     app.connect_command_line(|app, cl| {

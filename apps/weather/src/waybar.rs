@@ -1,10 +1,10 @@
-//! Waybar custom module output (`nixe-weather --waybar`) and headless cache refresh.
+//! Waybar custom module output (`nyx-weather --waybar`) and headless cache refresh.
 //!
 //! Reuses the SQLite forecast cache directly without starting GTK, refreshing
 //! only when the cached entry is missing or older than `refresh_interval_mins`.
 
 use crate::{backend, prefs};
-use nixe_weather_core::{ForecastSnapshot, cardinal_direction};
+use nyx_weather_core::{ForecastSnapshot, cardinal_direction};
 use serde_json::json;
 
 /// Emit a single line of Waybar JSON for the active saved location.
@@ -131,7 +131,7 @@ pub fn refresh_all_cli() -> i32 {
     for loc in &p.saved_locations {
         let outcome = backend::load_or_fetch(loc, &cfg, 0, true);
         if let Some(err) = outcome.error {
-            eprintln!("nixe-weather: {}: {err}", loc.name);
+            eprintln!("nyx-weather: {}: {err}", loc.name);
             failed = true;
         }
     }
@@ -141,7 +141,7 @@ pub fn refresh_all_cli() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nixe_weather_core::{
+    use nyx_weather_core::{
         CurrentWeather, DailyForecast, Location, ProviderAttribution, WeatherCondition,
     };
 
@@ -214,8 +214,8 @@ mod tests {
             },
         };
         let p = prefs::Prefs {
-            temperature_unit: nixe_weather_core::TemperatureUnit::Fahrenheit,
-            wind_speed_unit: nixe_weather_core::WindSpeedUnit::Mph,
+            temperature_unit: nyx_weather_core::TemperatureUnit::Fahrenheit,
+            wind_speed_unit: nyx_weather_core::WindSpeedUnit::Mph,
             ..Default::default()
         };
         let out = format_waybar_payload(&snap, &p, false);

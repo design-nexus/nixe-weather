@@ -142,7 +142,7 @@ impl Default for RadarClient {
 impl RadarClient {
     pub fn new() -> Self {
         let http = Client::builder()
-            .user_agent("nixe-weather/0.1 (https://github.com/design-nexus/nixe)")
+            .user_agent("nyx-weather/0.1 (https://github.com/design-nexus/nyx)")
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(12))
             .redirect(redirect::Policy::none())

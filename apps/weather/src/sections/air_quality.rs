@@ -4,7 +4,7 @@
 use crate::charts::{self, ChartSeries};
 use crate::widgets::{self, Page};
 use gtk::prelude::*;
-use nixe_weather_core::{
+use nyx_weather_core::{
     ForecastSnapshot, pollen_category, us_aqi_category, uv_category,
 };
 

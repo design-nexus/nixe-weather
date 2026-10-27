@@ -1,8 +1,8 @@
-//! Preferences for Weather (`~/.config/nixe-weather/settings.toml`).
+//! Preferences for Weather (`~/.config/nyx-weather/settings.toml`).
 
-pub use nixe_theme::ThemeMode;
+pub use nyx_theme::ThemeMode;
 
-use nixe_weather_core::{
+use nyx_weather_core::{
     DistanceUnit, Location, OpenMeteoConfig, PrecipitationUnit, PressureUnit, TemperatureUnit,
     UnitPrefs, WindSpeedUnit,
 };
@@ -145,23 +145,23 @@ impl Prefs {
     }
 }
 
-/// Synchronously update `~/.config/hypr/nixe.lua` to match `float`.
+/// Synchronously update `~/.config/hypr/nyx.lua` to match `float`.
 /// Returns `true` if the file on disk was modified.
 pub fn write_hypr_rule(float: bool) -> bool {
     let hypr_dir = crate::paths::home().join(".config/hypr");
-    let nixe_lua = hypr_dir.join("nixe.lua");
+    let nyx_lua = hypr_dir.join("nyx.lua");
     let rule_line =
-        r#"o.window("^io\\.github\\.design_nexus\\.nixe\\.Weather$", { float = true, center = true, size = { 460, 720 } })"#;
+        r#"o.window("^io\\.github\\.design_nexus\\.nyx\\.Weather$", { float = true, center = true, size = { 460, 720 } })"#;
 
     if !hypr_dir.is_dir() {
         return false;
     }
-    let existing = std::fs::read_to_string(&nixe_lua).unwrap_or_else(|_| {
-        "-- Written by the Nixe installer: Nixe apps that open as floating windows.\n-- Reinstalling an app rewrites this file.\n".to_string()
+    let existing = std::fs::read_to_string(&nyx_lua).unwrap_or_else(|_| {
+        "-- Written by the Nyx installer: Nyx apps that open as floating windows.\n-- Reinstalling an app rewrites this file.\n".to_string()
     });
     let mut lines: Vec<&str> = existing
         .lines()
-        .filter(|l| !l.contains("nixe\\.Weather") && !l.contains("nixe.Weather"))
+        .filter(|l| !l.contains("nyx\\.Weather") && !l.contains("nyx.Weather"))
         .collect();
     if float {
         lines.push(rule_line);
@@ -173,11 +173,11 @@ pub fn write_hypr_rule(float: bool) -> bool {
     if out == existing {
         return false;
     }
-    let _ = crate::cmd::atomic_write(&nixe_lua, &out);
+    let _ = crate::cmd::atomic_write(&nyx_lua, &out);
     true
 }
 
-/// Ensure `~/.config/hypr/nixe.lua` matches `float` before the window maps on startup.
+/// Ensure `~/.config/hypr/nyx.lua` matches `float` before the window maps on startup.
 /// If the rule file changed, reloads Hyprland synchronously so the new window maps with the right rule.
 pub fn sync_hypr_rule_on_startup(float: bool) {
     if write_hypr_rule(float) {
@@ -198,7 +198,7 @@ pub fn ensure_live_window_state(float: bool) {
     if let Some(arr) = clients_out.as_ref().and_then(|v| v.as_array()) {
         for c in arr {
             let class = c.get("class").and_then(|v| v.as_str()).unwrap_or("");
-            if class != "io.github.design_nexus.nixe.Weather" {
+            if class != "io.github.design_nexus.nyx.Weather" {
                 continue;
             }
             let Some(addr) = c.get("address").and_then(|v| v.as_str()) else {
@@ -252,7 +252,7 @@ pub fn ensure_live_window_state(float: bool) {
     }
 }
 
-/// Apply the floating-window preference to `~/.config/hypr/nixe.lua` and the live Hyprland session.
+/// Apply the floating-window preference to `~/.config/hypr/nyx.lua` and the live Hyprland session.
 pub fn apply_floating_window(float: bool) {
     let rule_changed = write_hypr_rule(float);
 
@@ -273,4 +273,4 @@ pub fn read_disk() -> Prefs {
         .unwrap_or_default()
 }
 
-nixe_core::prefs_store!(Prefs);
+nyx_core::prefs_store!(Prefs);

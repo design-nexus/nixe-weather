@@ -4,7 +4,7 @@ use crate::widgets::{self, Page};
 use crate::{prefs, settings_dialog, theme, window};
 use gtk::glib;
 use gtk::prelude::*;
-use nixe_weather_core::{DistanceUnit, PrecipitationUnit, PressureUnit, TemperatureUnit, WindSpeedUnit};
+use nyx_weather_core::{DistanceUnit, PrecipitationUnit, PressureUnit, TemperatureUnit, WindSpeedUnit};
 
 fn apply_units(change: impl FnOnce(&mut prefs::Prefs)) {
     // The sidebar's temperature badges use the units too.
@@ -213,7 +213,7 @@ pub fn build(page: &Page) {
     }
     let add = widgets::icon_button("list-add-symbolic", "Add a location (Ctrl+F)");
     add.connect_clicked(|_| {
-        nixe_ui::settings_card::close();
+        nyx_ui::settings_card::close();
         window::show_search();
     });
     g.add(&widgets::row(
@@ -242,7 +242,7 @@ pub fn build(page: &Page) {
         .collect();
     let (theme_row, theme_dd) = widgets::choice_row(
         "Theme",
-        "Dracula, Catppuccin, Tokyo Night, One Dark Pro and more. Add your own in <tt>~/.config/nixe-weather/themes</tt>.",
+        "Dracula, Catppuccin, Tokyo Night, One Dark Pro and more. Add your own in <tt>~/.config/nyx-weather/themes</tt>.",
         options,
         &p.theme,
         |id| {
@@ -328,7 +328,7 @@ pub fn build(page: &Page) {
         },
     );
     g.add(&r);
-    g.add(&nixe_ui::widgets::start_row());
+    g.add(&nyx_ui::widgets::start_row());
 
     // ----- Keyboard -----
     let g = page.group("Keyboard");
@@ -342,7 +342,7 @@ pub fn build(page: &Page) {
     }
     g.note(&format!(
         "Use <tt>{}</tt> in Waybar and <tt>{}</tt> for click-to-open.",
-        glib::markup_escape_text("nixe-weather --waybar"),
-        glib::markup_escape_text("nixe-weather --toggle"),
+        glib::markup_escape_text("nyx-weather --waybar"),
+        glib::markup_escape_text("nyx-weather --toggle"),
     ));
 }

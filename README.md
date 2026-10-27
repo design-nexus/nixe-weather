@@ -36,22 +36,22 @@ you save, in a GTK 4 window.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/design-nexus/nixe-weather/main/install.sh | bash -s -- weather
+curl -fsSL https://raw.githubusercontent.com/design-nexus/nyx-weather/main/install.sh | bash -s -- weather
 ```
 
-This builds with Cargo and installs `nixe-weather` to `~/.local/bin` with a launcher
+This builds with Cargo and installs `nyx-weather` to `~/.local/bin` with a launcher
 entry. To remove it, run the same line with `uninstall.sh` in place of `install.sh`.
 
 ## Usage
 
 ```
-nixe-weather                      Open or focus Weather
-nixe-weather --toggle             Open, or close it if it's open
-nixe-weather --section NAME       overview, hourly, daily, radar, air-quality, astronomy, settings
-nixe-weather --location "Tokyo"   Switch to a saved place, or find and save it
-nixe-weather --waybar             Waybar JSON, fetching first if the forecast is stale
-nixe-weather --waybar-cached      Waybar JSON from the cache only
-nixe-weather --refresh            Refresh every saved place and exit
+nyx-weather                      Open or focus Weather
+nyx-weather --toggle             Open, or close it if it's open
+nyx-weather --section NAME       overview, hourly, daily, radar, air-quality, astronomy, settings
+nyx-weather --location "Tokyo"   Switch to a saved place, or find and save it
+nyx-weather --waybar             Waybar JSON, fetching first if the forecast is stale
+nyx-weather --waybar-cached      Waybar JSON from the cache only
+nyx-weather --refresh            Refresh every saved place and exit
 ```
 
 ## Keys
@@ -71,9 +71,9 @@ nixe-weather --refresh            Refresh every saved place and exit
 
 ## Files
 
-- Settings: `~/.config/nixe-weather/settings.toml`
-- Forecast, search, map tile and grid cache: `~/.cache/nixe-weather/weather.db`
-- Nixe Assistant works Weather over the session bus: `current`, `forecast`, `query`, `locations`, `select_location`, `refresh`.
+- Settings: `~/.config/nyx-weather/settings.toml`
+- Forecast, search, map tile and grid cache: `~/.cache/nyx-weather/weather.db`
+- Nyx Assistant works Weather over the session bus: `current`, `forecast`, `query`, `locations`, `select_location`, `refresh`.
 
 ## Data
 

@@ -32,7 +32,7 @@ impl NoaaAlertProvider {
         headers.insert(ACCEPT, HeaderValue::from_static("application/geo+json"));
         headers.insert(
             USER_AGENT,
-            HeaderValue::from_static("NixeWeather/0.1 (https://github.com/design-nexus/nixe)"),
+            HeaderValue::from_static("NyxWeather/0.1 (https://github.com/design-nexus/nyx)"),
         );
         Client::builder()
             .default_headers(headers)

@@ -6,7 +6,7 @@ use crate::prefs;
 use crate::sections::{format_day_full, format_day_name, format_duration_secs, format_sun_time};
 use crate::widgets::{self, Page};
 use gtk::prelude::*;
-use nixe_weather_core::{ForecastSnapshot, cardinal_direction, uv_category};
+use nyx_weather_core::{ForecastSnapshot, cardinal_direction, uv_category};
 
 pub fn build(
     page: &Page,

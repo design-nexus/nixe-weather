@@ -1,10 +1,10 @@
-//! Paths for Weather, re-exporting `nixe_core::paths` and adding the SQLite cache file.
+//! Paths for Weather, re-exporting `nyx_core::paths` and adding the SQLite cache file.
 
-pub use nixe_core::paths::*;
+pub use nyx_core::paths::*;
 
 use std::path::PathBuf;
 
-/// `~/.cache/nixe-weather/weather.db`
+/// `~/.cache/nyx-weather/weather.db`
 pub fn cache_db() -> PathBuf {
     cache_dir().join("weather.db")
 }

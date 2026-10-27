@@ -1,9 +1,9 @@
-//! D-Bus control interface (`io.github.design_nexus.nixe.Control`) for Nixe Assistant,
-//! Nixe Glimpse, and Nixe Calendar integration.
+//! D-Bus control interface (`io.github.design_nexus.nyx.Control`) for Nyx Assistant,
+//! Nyx Glimpse, and Nyx Calendar integration.
 
 use crate::{backend, cmd, prefs, window};
-use nixe_core::control::{self, Reply};
-use nixe_weather_core::{evaluate_query, parse_query};
+use nyx_core::control::{self, Reply};
+use nyx_weather_core::{evaluate_query, parse_query};
 use serde_json::{Value, json};
 
 pub fn tools() -> Value {
@@ -144,9 +144,9 @@ pub fn handle(name: &str, args: Value, reply: Reply) {
             };
             // A bare place name ("Seattle") is a question about its weather.
             let intent = parse_query(&raw).unwrap_or_else(|| {
-                parse_query(&format!("weather {raw}")).unwrap_or(nixe_weather_core::QueryIntent {
+                parse_query(&format!("weather {raw}")).unwrap_or(nyx_weather_core::QueryIntent {
                     rain_focus: false,
-                    day: nixe_weather_core::query::TargetDay::Today,
+                    day: nyx_weather_core::query::TargetDay::Today,
                     location_query: None,
                 })
             });

@@ -10,7 +10,7 @@ pub mod settings;
 
 use crate::widgets::Page;
 use chrono::{Datelike, NaiveDate, NaiveDateTime};
-use nixe_weather_core::ForecastSnapshot;
+use nyx_weather_core::ForecastSnapshot;
 
 pub struct Section {
     pub id: &'static str,

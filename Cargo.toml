@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["apps/weather", "crates/nixe-weather-core"]
+members = ["apps/weather", "crates/nyx-weather-core"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 authors = ["Ken Smith"]
-repository = "https://github.com/design-nexus/nixe-weather"
+repository = "https://github.com/design-nexus/nyx-weather"
 
 [profile.release]
 lto = "thin"

@@ -5,7 +5,7 @@
 use crate::theme::{self, Rgb};
 use gtk::prelude::*;
 use gtk::{cairo, gdk_pixbuf, glib};
-use nixe_weather_core::{
+use nyx_weather_core::{
     FieldGrid, ForecastSnapshot, MoonPhaseInfo, RadarLayerKind, TileGridPayload, UnitPrefs,
     cardinal_direction,
 };
@@ -571,7 +571,7 @@ fn decode_png_tile(bytes: &[u8]) -> Option<gdk_pixbuf::Pixbuf> {
 }
 
 /// Recolor an OpenStreetMap basemap tile on the fly so it matches the active
-/// Omarchy / Nixe theme (dark or light) and changes live when the theme changes.
+/// Omarchy / Nyx theme (dark or light) and changes live when the theme changes.
 fn theme_tint_basemap_pixbuf(src: &gdk_pixbuf::Pixbuf) -> gdk_pixbuf::Pixbuf {
     let p = theme::palette();
     let wc = theme::weather_colors_for(&p);
@@ -962,14 +962,14 @@ pub fn draw_radar_map(
 /// corner, so a lat/lon can be placed on it.
 #[derive(Clone, Copy)]
 struct MapLayout {
-    center: nixe_weather_core::TileCoord,
+    center: nyx_weather_core::TileCoord,
     tile_px: f64,
     origin_x: f64,
     origin_y: f64,
 }
 
 impl MapLayout {
-    fn new(center: nixe_weather_core::TileCoord, w: f64, h: f64, pinch_scale: f64) -> Self {
+    fn new(center: nyx_weather_core::TileCoord, w: f64, h: f64, pinch_scale: f64) -> Self {
         let cover_x = (1.0 + center.frac_x).min(2.0 - center.frac_x).max(0.5);
         let cover_y = (1.0 + center.frac_y).min(2.0 - center.frac_y).max(0.5);
         let min_cover_px = ((w * 0.5) / cover_x).max((h * 0.5) / cover_y).max(256.0);

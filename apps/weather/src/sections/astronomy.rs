@@ -6,7 +6,7 @@ use crate::sections::{format_day_name, format_duration_secs, format_sun_time};
 use crate::widgets::{self, Page};
 use crate::{backend, prefs};
 use gtk::prelude::*;
-use nixe_weather_core::{ForecastSnapshot, calculate_moon_phase};
+use nyx_weather_core::{ForecastSnapshot, calculate_moon_phase};
 
 pub fn build(
     page: &Page,

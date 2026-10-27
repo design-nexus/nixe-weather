@@ -1,7 +1,7 @@
 //! Worker-thread weather fetching, radar tile loading, caching, and offline fallback orchestration.
 
 use crate::paths;
-use nixe_weather_core::{
+use nyx_weather_core::{
     Bounds, Cache, FIELD_SIZE, FieldGrid, ForecastSnapshot, Location, OpenMeteoConfig, OpenMeteoProvider, ProviderError,
     RadarClient, RadarFrame, RadarLayerKind, RadarManifest, TileGridPayload, WeatherProvider,
 };
@@ -59,7 +59,7 @@ pub fn get_cached(location_id: &str) -> Option<ForecastSnapshot> {
     with_cache(|c| match c.get_forecast(location_id) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("nixe-weather: cached forecast for {location_id}: {e:#}");
+            eprintln!("nyx-weather: cached forecast for {location_id}: {e:#}");
             None
         }
     })
@@ -221,7 +221,7 @@ pub fn prewarm_radar(lat: f64, lon: f64) {
 /// Wind, temperature and pressure over the 3×3 tile map around (`lat`, `lon`) at zoom
 /// `z`: from the cache when under 30 minutes old, otherwise from Open-Meteo.
 pub fn fetch_field(lat: f64, lon: f64, z: u8, config: &OpenMeteoConfig) -> Result<FieldGrid, ProviderError> {
-    let center = nixe_weather_core::lat_lon_to_tile(lat, lon, z);
+    let center = nyx_weather_core::lat_lon_to_tile(lat, lon, z);
     let key = format!("{}/{}/{}", center.z, center.x, center.y);
     let now = now_epoch();
     if let Some(grid) = with_cache(|c| c.get_field(&key, 30 * 60, now).ok().flatten()).flatten() {

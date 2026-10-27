@@ -3,7 +3,7 @@
 use crate::prefs;
 use gtk::gio;
 use gtk::prelude::*;
-use nixe_weather_core::{AlertSeverity, ForecastSnapshot};
+use nyx_weather_core::{AlertSeverity, ForecastSnapshot};
 
 /// Ids remembered, so an alert is notified once even after it drops out and returns.
 const REMEMBERED: usize = 100;

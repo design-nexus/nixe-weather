@@ -5,7 +5,7 @@ use crate::widgets::{self, Page};
 use crate::{backend, charts, cmd, prefs, theme};
 use gtk::glib;
 use gtk::prelude::*;
-use nixe_weather_core::{
+use nyx_weather_core::{
     FieldGrid, ForecastSnapshot, RAINVIEWER_MAX_ZOOM, RadarFrame, RadarLayerKind, RadarManifest,
     TileGridPayload, cardinal_direction,
 };
@@ -277,7 +277,7 @@ pub fn build(
                 && is_tile_layer(layer)
             {
                 // In the location's own time.
-                let local = nixe_weather_core::local_time(f.time, utc_offset as i32);
+                let local = nyx_weather_core::local_time(f.time, utc_offset as i32);
                 let dt_str = if prefs::get().use_24h_time {
                     local.format("%H:%M").to_string()
                 } else {
@@ -413,7 +413,7 @@ pub fn build(
                                 existing.is_nowcast = is_nowcast;
                             } else {
                                 st.grid = Some(TileGridPayload {
-                                    center: nixe_weather_core::lat_lon_to_tile(lat, lon, zoom),
+                                    center: nyx_weather_core::lat_lon_to_tile(lat, lon, zoom),
                                     basemap_tiles: vec![None; 9],
                                     overlay_tiles: ov_tiles,
                                     frame_time,

@@ -7,8 +7,8 @@ use crate::widgets;
 use crate::{backend, cmd, prefs, settings_dialog, theme};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use nixe_ui::chrome;
-use nixe_weather_core::{ForecastSnapshot, Location};
+use nyx_ui::chrome;
+use nyx_weather_core::{ForecastSnapshot, Location};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -102,7 +102,7 @@ pub fn present(app: &gtk::Application, section: Option<&str>, location_arg: Opti
 
     let start = section
         .map(String::from)
-        .unwrap_or_else(|| nixe_theme::start_page("overview", &prefs::get().last_section));
+        .unwrap_or_else(|| nyx_theme::start_page("overview", &prefs::get().last_section));
     navigate(&start);
 
     if let Some(loc_q) = location_arg {
@@ -170,9 +170,9 @@ fn build(app: &gtk::Application) {
     window.set_size_request(360, 480);
     // No client-side titlebar: Hyprland manages windows.
     window.set_titlebar(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
-    nixe_ui::keys::install(
+    nyx_ui::keys::install(
         &window,
-        nixe_ui::keys::Common {
+        nyx_ui::keys::Common {
             settings: Some(settings_dialog::open),
             close: true,
             ..Default::default()
@@ -499,7 +499,7 @@ pub fn apply_floating_size(float: bool) {
     };
     if float {
         if settings_dialog::is_open() {
-            nixe_ui::settings_card::close();
+            nyx_ui::settings_card::close();
         }
         NARROW.with(|n| n.set(true));
         apply_compact(&nav, true);
@@ -1038,7 +1038,7 @@ type ToastAction<'a> = Option<(&'a str, Box<dyn Fn()>)>;
 
 fn show_toast(message: &str, action: ToastAction<'_>) {
     let Some(u) = ui() else {
-        eprintln!("nixe-weather: {message}");
+        eprintln!("nyx-weather: {message}");
         return;
     };
     let overlay = u.borrow().overlay.clone();

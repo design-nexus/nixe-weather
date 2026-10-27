@@ -1,13 +1,13 @@
-//! Theming: the shared Nixe theme engine, plus rich semantic weather colors
-//! derived from Omarchy's `colors.toml` or the active Nixe theme palette.
+//! Theming: the shared Nyx theme engine, plus rich semantic weather colors
+//! derived from Omarchy's `colors.toml` or the active Nyx theme palette.
 
-pub use nixe_theme::*;
+pub use nyx_theme::*;
 
 use crate::prefs;
-use nixe_weather_core::WeatherCondition;
+use nyx_weather_core::WeatherCondition;
 
 /// Rich semantic colors for weather conditions, charts, and radar maps.
-/// Changes automatically whenever the Omarchy theme or Nixe theme changes.
+/// Changes automatically whenever the Omarchy theme or Nyx theme changes.
 #[derive(Debug, Clone, Copy)]
 pub struct WeatherColors {
     /// Yellow / Gold — Sun, clear sky, moderate alerts, daylight arc
@@ -102,7 +102,7 @@ fn derive_weather_colors(p: &Palette) -> WeatherColors {
     let mut cold = accent;
 
     if prefs::get().mode == ThemeMode::Omarchy
-        && let Ok(text) = std::fs::read_to_string(nixe_core::paths::omarchy_colors())
+        && let Ok(text) = std::fs::read_to_string(nyx_core::paths::omarchy_colors())
         && let Ok(table) = toml::from_str::<toml::Table>(&text)
     {
         let get_rgb = |key: &str| {
@@ -204,7 +204,7 @@ pub fn condition_color_class(cond: WeatherCondition, is_day: bool) -> &'static s
 
 /// Install the stylesheet and the current palette, and follow Omarchy live.
 pub fn install() {
-    nixe_theme::install(Style {
+    nyx_theme::install(Style {
         window_class: "weather-window",
         base_skip: &[],
         css: include_str!("style.css"),

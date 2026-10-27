@@ -1,8 +1,8 @@
 # Weather — notes for working on this app
 
 - GTK4 (gtk4-rs 0.11) + Rust, no libadwaita, built to `STYLE.md`. The weather logic is
-  `crates/nixe-weather-core`; the app is the GTK shell.
-- Core (`crates/nixe-weather-core`):
+  `crates/nyx-weather-core`; the app is the GTK shell.
+- Core (`crates/nyx-weather-core`):
   - `model.rs`: the snapshot types and units (temperature, wind, precipitation, pressure,
     distance). `ForecastSnapshot::advance_to(now)` drops past hours and days, expired
     alerts and old nowcast steps, and makes "now" this hour's forecast when the snapshot
@@ -29,7 +29,7 @@
   hidden Radar page's timers stop. Theme changes don't rebuild pages: charts and the map
   `theme::subscribe` and redraw. `notify.rs`: Severe/Extreme alert notifications, ids
   remembered in prefs.
-- Floating mode writes the rule into `~/.config/hypr/nixe.lua` and reloads Hyprland; the
+- Floating mode writes the rule into `~/.config/hypr/nyx.lua` and reloads Hyprland; the
   installer always `require`s that file when Weather is installed.
-- `plugin/`: the omarchy-shell bar widget (polls `nixe-weather --waybar`).
-- Checks: `cargo test -p nixe-weather-core -p nixe-weather`, clippy `-D warnings` on both.
+- `plugin/`: the omarchy-shell bar widget (polls `nyx-weather --waybar`).
+- Checks: `cargo test -p nyx-weather-core -p nyx-weather`, clippy `-D warnings` on both.

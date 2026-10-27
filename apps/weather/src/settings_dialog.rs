@@ -4,9 +4,9 @@
 use crate::sections::settings;
 use crate::{widgets, window};
 use gtk::prelude::*;
-use nixe_ui::settings_card::{self, Spec};
+use nyx_ui::settings_card::{self, Spec};
 
-pub use nixe_ui::settings_card::{escape, fit, is_open};
+pub use nyx_ui::settings_card::{escape, fit, is_open};
 
 const GROUPS: &[(&str, &str, &str)] = &[
     ("Units & forecast", "weather-clear-symbolic", "Temperature, wind, refresh, API"),
