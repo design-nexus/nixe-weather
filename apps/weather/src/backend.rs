@@ -2,8 +2,8 @@
 
 use crate::paths;
 use nyx_weather_core::{
-    Bounds, Cache, FIELD_SIZE, FieldGrid, ForecastSnapshot, Location, OpenMeteoConfig, OpenMeteoProvider, ProviderError,
-    RadarClient, RadarFrame, RadarLayerKind, RadarManifest, TileGridPayload, WeatherProvider,
+    Cache, FIELD_SIZE, FieldGrid, ForecastSnapshot, Location, OpenMeteoConfig, OpenMeteoProvider, ProviderError,
+    RadarClient, RadarManifest, TileView, WeatherProvider,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -168,66 +168,48 @@ pub fn fetch_radar_manifest() -> Result<RadarManifest, ProviderError> {
     Ok(m)
 }
 
-/// Synchronously read any cached basemap + overlay tiles from SQLite without network I/O.
-pub fn get_cached_radar_grid(
-    lat: f64,
-    lon: f64,
-    z: u8,
-    host: &str,
-    frame: Option<&RadarFrame>,
-    layer: RadarLayerKind,
-) -> Option<TileGridPayload> {
-    with_cache(|c| RadarClient::get_cached_grid(lat, lon, z, host, frame, layer, c)).flatten()
+/// Whatever of `urls` is already in the cache, without network I/O.
+pub fn cached_tiles(urls: &[Option<String>]) -> Vec<Option<Vec<u8>>> {
+    with_cache(|c| RadarClient::cached_tiles(urls, c)).unwrap_or_else(|| vec![None; urls.len()])
 }
 
-/// Fetch only the 3×3 background basemap tiles (cached in SQLite, parallel HTTP on cache miss).
-pub fn fetch_basemap_grid(lat: f64, lon: f64, z: u8) -> TileGridPayload {
-    with_cache(|c| radar_client().fetch_basemap_grid(lat, lon, z, Some(c)))
-        .unwrap_or_else(|| radar_client().fetch_basemap_grid(lat, lon, z, None))
+/// Fetch map tiles (from the cache first, the rest over HTTP), on a worker.
+pub fn fetch_tiles(urls: &[Option<String>]) -> Vec<Option<Vec<u8>>> {
+    with_cache(|c| radar_client().fetch_tiles(urls, Some(c))).unwrap_or_else(|| radar_client().fetch_tiles(urls, None))
 }
 
-/// Fetch only the 3×3 radar/satellite overlay tiles in parallel.
-pub fn fetch_overlay_tiles(
-    lat: f64,
-    lon: f64,
-    z: u8,
-    host: &str,
-    frame: Option<&RadarFrame>,
-    layer: RadarLayerKind,
-) -> Vec<Option<Vec<u8>>> {
-    with_cache(|c| radar_client().fetch_overlay_tiles(lat, lon, z, host, frame, layer, Some(c)))
-        .unwrap_or_else(|| radar_client().fetch_overlay_tiles(lat, lon, z, host, frame, layer, None))
-}
-
-/// Pre-warm the Z6 basemap and latest radar frame in a background thread so opening Radar is instant.
-pub fn prewarm_radar(lat: f64, lon: f64) {
+/// Pre-warm the Radar page's opening view (zoom 6 at a typical size, the basemap one
+/// zoom in on HiDPI) and its newest radar frame, so opening Radar is instant.
+pub fn prewarm_radar(location: &Location, scale: i32) {
+    let (lat, lon, us) = (location.latitude, location.longitude, location.is_us());
     std::thread::spawn(move || {
-        let _ = fetch_basemap_grid(lat, lon, 6);
-        if let Ok(m) = fetch_radar_manifest()
-            && let Some(last) = m.radar_frames.last()
-        {
-            let _ = fetch_overlay_tiles(
-                lat,
-                lon,
-                6,
-                &m.host,
-                Some(last),
-                RadarLayerKind::PrecipitationRadar,
-            );
+        let (w, h) = (1100.0, 640.0);
+        let base_z = if scale >= 2 { 7 } else { 6 };
+        let _ = fetch_tiles(&RadarClient::basemap_urls(&TileView::covering(lat, lon, 6, base_z, w, h)));
+        let (host, frame) = if us {
+            (String::new(), nyx_weather_core::iem_radar_frames(now_epoch()).pop())
+        } else {
+            match fetch_radar_manifest() {
+                Ok(m) => (m.host.clone(), m.radar_frames.into_iter().rfind(|f| !f.is_nowcast)),
+                Err(_) => return,
+            }
+        };
+        if let Some(f) = frame {
+            let view = TileView::covering(lat, lon, 6, f.tile_zoom(6), w, h);
+            let _ = fetch_tiles(&RadarClient::overlay_urls(&view, &host, &f));
         }
     });
 }
 
-/// Wind, temperature and pressure over the 3×3 tile map around (`lat`, `lon`) at zoom
-/// `z`: from the cache when under 30 minutes old, otherwise from Open-Meteo.
-pub fn fetch_field(lat: f64, lon: f64, z: u8, config: &OpenMeteoConfig) -> Result<FieldGrid, ProviderError> {
-    let center = nyx_weather_core::lat_lon_to_tile(lat, lon, z);
-    let key = format!("{}/{}/{}", center.z, center.x, center.y);
+/// Wind, temperature and pressure over `view`: from the cache when under 30 minutes
+/// old, otherwise from Open-Meteo.
+pub fn fetch_field(view: &TileView, config: &OpenMeteoConfig) -> Result<FieldGrid, ProviderError> {
+    let key = view.key();
     let now = now_epoch();
     if let Some(grid) = with_cache(|c| c.get_field(&key, 30 * 60, now).ok().flatten()).flatten() {
         return Ok(grid);
     }
-    let grid = OpenMeteoProvider::new(config.clone()).fetch_field(Bounds::of_tile_grid(center), FIELD_SIZE)?;
+    let grid = OpenMeteoProvider::new(config.clone()).fetch_field(view.bounds(), FIELD_SIZE)?;
     with_cache(|c| c.put_field(&key, &grid));
     Ok(grid)
 }

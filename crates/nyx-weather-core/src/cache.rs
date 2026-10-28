@@ -15,7 +15,7 @@ pub struct Cache {
 const VERSION: i64 = 2;
 /// Tiles kept per kind (basemap, everything else), so animating radar frames never
 /// pushes the map out.
-const TILES_KEPT: i64 = 400;
+const TILES_KEPT: i64 = 1500;
 const BASEMAP: &str = "%tile.openstreetmap.org%";
 
 impl Cache {

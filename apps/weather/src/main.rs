@@ -4,6 +4,7 @@ mod backend;
 mod charts;
 mod cmd;
 mod control;
+mod maprender;
 mod notify;
 mod paths;
 mod prefs;

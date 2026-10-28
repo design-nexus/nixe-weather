@@ -2,13 +2,15 @@
 //! Every color is derived from `theme::palette()` and `theme::weather_colors()`
 //! so live Omarchy theme changes apply immediately to all graphs and maps.
 
+use crate::maprender::MapGeom;
 use crate::theme::{self, Rgb};
 use gtk::prelude::*;
-use gtk::{cairo, gdk_pixbuf, glib};
+use gtk::cairo;
 use nyx_weather_core::{
-    FieldGrid, ForecastSnapshot, MoonPhaseInfo, RadarLayerKind, TileGridPayload, UnitPrefs,
+    Echo, FieldGrid, ForecastSnapshot, MoonPhaseInfo, RadarLayerKind, UnitPrefs,
     cardinal_direction,
 };
+use nyx_weather_core::reflectivity::nws_color;
 use std::f64::consts::PI;
 
 /// Chart and map labels are in the theme's interface font: the first family of
@@ -573,204 +575,37 @@ pub fn moon_phase_canvas(info: MoonPhaseInfo) -> gtk::DrawingArea {
     area
 }
 
-fn decode_png_tile(bytes: &[u8]) -> Option<gdk_pixbuf::Pixbuf> {
-    let gbytes = glib::Bytes::from(bytes);
-    let stream = gtk::gio::MemoryInputStream::from_bytes(&gbytes);
-    gdk_pixbuf::Pixbuf::from_stream(&stream, None::<&gtk::gio::Cancellable>).ok()
+/// What the map canvas shows: the composed basemap, the radar or satellite frames being
+/// cross-faded, or a field drawn from grid points, and what goes over them.
+pub struct MapScene<'a> {
+    pub layer: RadarLayerKind,
+    /// Where the map is; `None` until there's a place to show.
+    pub geom: Option<MapGeom>,
+    pub basemap: Option<&'a cairo::ImageSurface>,
+    /// The frame showing, the next one, and how far into it the fade is (0–1).
+    pub frames: Option<(&'a cairo::ImageSurface, Option<&'a cairo::ImageSurface>, f64)>,
+    pub field: Option<&'a FieldGrid>,
+    pub snap: Option<&'a ForecastSnapshot>,
+    pub units: UnitPrefs,
+    pub opacity: f64,
+    pub anim_phase: f64,
+    pub notice: Option<&'a str>,
+    /// The data credits the services ask for.
+    pub credit: &'a str,
 }
 
-/// Recolor an OpenStreetMap basemap tile on the fly so it matches the active
-/// Omarchy / Nyx theme (dark or light) and changes live when the theme changes.
-fn theme_tint_basemap_pixbuf(src: &gdk_pixbuf::Pixbuf) -> gdk_pixbuf::Pixbuf {
-    let p = theme::palette();
-    let wc = theme::weather_colors_for(&p);
-    let bg = Rgb::hex(&p.bg);
-    let surface = Rgb::hex(&p.surface);
-    let text = Rgb::hex(&p.text);
-    let dim = Rgb::hex(&p.dim_text);
-
-    let out = src.copy().unwrap_or_else(|| src.clone());
-    let w = out.width() as usize;
-    let h = out.height() as usize;
-    let rowstride = out.rowstride() as usize;
-    let n_channels = out.n_channels() as usize;
-    if n_channels < 3 {
-        return out;
+/// Paint `s` (composed for a canvas of its own size) centred on a `w × h` canvas.
+fn paint_centered(cr: &cairo::Context, s: &cairo::ImageSurface, w: f64, h: f64, alpha: f64) {
+    let (sx, sy) = s.device_scale();
+    let (sw, sh) = (s.width() as f64 / sx, s.height() as f64 / sy);
+    if cr.set_source_surface(s, ((w - sw) / 2.0).round(), ((h - sh) / 2.0).round()).is_ok() {
+        cr.source().set_filter(cairo::Filter::Bilinear);
+        let _ = cr.paint_with_alpha(alpha);
     }
-
-    // Precompute 0..255 RGB tuples for fast pixel blending
-    let to_u8 = |c: Rgb| -> (f64, f64, f64) { (c.0 * 255.0, c.1 * 255.0, c.2 * 255.0) };
-    let land_dark = to_u8(surface.mix(bg, 0.35));
-    let land_hi = to_u8(surface.mix(text, 0.07));
-    let water_col = to_u8(if p.light {
-        bg.mix(wc.rain, 0.32)
-    } else {
-        bg.mix(wc.rain, 0.25)
-    });
-    let park_col = to_u8(if p.light {
-        bg.mix(wc.wind, 0.22)
-    } else {
-        surface.mix(wc.wind, 0.16)
-    });
-    let road_col = to_u8(if p.light {
-        surface.mix(wc.warm, 0.42)
-    } else {
-        surface.mix(wc.warm, 0.32)
-    });
-    let label_col = to_u8(text.mix(dim, 0.15));
-    let border_col = to_u8(dim.mix(surface, 0.35));
-
-    // SAFETY: `out` is a freshly cloned unshared Pixbuf and we stay within `h * rowstride`.
-    let pixels = unsafe { out.pixels() };
-    for y in 0..h {
-        let row_start = y * rowstride;
-        for x in 0..w {
-            let idx = row_start + x * n_channels;
-            if idx + 2 >= pixels.len() {
-                continue;
-            }
-            let r = pixels[idx] as f64;
-            let g = pixels[idx + 1] as f64;
-            let b = pixels[idx + 2] as f64;
-            let luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
-
-            let is_water = b > r + 14.0 && b > g + 4.0;
-            let is_park = g > r + 9.0 && g > b + 9.0 && luma > 0.55;
-            let is_road = r > b + 20.0 && r >= g && luma > 0.52 && luma < 0.93;
-            let is_label_or_line = luma < 0.62;
-
-            let (nr, ng, nb) = if is_water {
-                water_col
-            } else if is_park {
-                park_col
-            } else if is_road {
-                road_col
-            } else if !p.light {
-                if is_label_or_line {
-                    // Invert dark OSM text/borders into crisp theme text
-                    let strength = ((0.62 - luma) / 0.62).clamp(0.0, 1.0);
-                    (
-                        border_col.0 + (label_col.0 - border_col.0) * strength,
-                        border_col.1 + (label_col.1 - border_col.1) * strength,
-                        border_col.2 + (label_col.2 - border_col.2) * strength,
-                    )
-                } else {
-                    let t = ((luma - 0.62) / 0.38).clamp(0.0, 1.0);
-                    (
-                        land_hi.0 + (land_dark.0 - land_hi.0) * t,
-                        land_hi.1 + (land_dark.1 - land_hi.1) * t,
-                        land_hi.2 + (land_dark.2 - land_hi.2) * t,
-                    )
-                }
-            } else {
-                // Light theme: harmonize with theme bg/surface while keeping dark labels sharp
-                let bg_u8 = to_u8(bg);
-                (r * 0.55 + bg_u8.0 * 0.45, g * 0.55 + bg_u8.1 * 0.45, b * 0.55 + bg_u8.2 * 0.45)
-            };
-
-            pixels[idx] = nr.clamp(0.0, 255.0) as u8;
-            pixels[idx + 1] = ng.clamp(0.0, 255.0) as u8;
-            pixels[idx + 2] = nb.clamp(0.0, 255.0) as u8;
-        }
-    }
-    out
-}
-
-/// Convert grayscale GOES Infrared satellite tiles into a translucent, theme-colored
-/// cloud-top overlay so clear ground stays transparent and cloud tops glow in theme colors.
-fn colorize_ir_pixbuf(src: &gdk_pixbuf::Pixbuf) -> gdk_pixbuf::Pixbuf {
-    let p = theme::palette();
-    let wc = theme::weather_colors_for(&p);
-    let with_alpha = src.add_alpha(false, 0, 0, 0).unwrap_or_else(|_| src.clone());
-    let w = with_alpha.width() as usize;
-    let h = with_alpha.height() as usize;
-    let rowstride = with_alpha.rowstride() as usize;
-    let n_channels = with_alpha.n_channels() as usize;
-    if n_channels < 4 {
-        return with_alpha;
-    }
-
-    let low_cloud = wc.rain;
-    let high_cloud = wc.uv.mix(wc.sun, 0.4);
-
-    // SAFETY: `with_alpha` is a newly created Pixbuf owned uniquely here.
-    let pixels = unsafe { with_alpha.pixels() };
-    for y in 0..h {
-        let row_start = y * rowstride;
-        for x in 0..w {
-            let idx = row_start + x * n_channels;
-            if idx + 3 >= pixels.len() {
-                continue;
-            }
-            let r = pixels[idx] as f64;
-            let g = pixels[idx + 1] as f64;
-            let b = pixels[idx + 2] as f64;
-            let luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
-
-            if luma < 0.36 {
-                pixels[idx + 3] = 0;
-            } else {
-                let norm = ((luma - 0.36) / 0.64).clamp(0.0, 1.0);
-                let col = low_cloud.mix(high_cloud, norm);
-                pixels[idx] = (col.0 * 255.0).clamp(0.0, 255.0) as u8;
-                pixels[idx + 1] = (col.1 * 255.0).clamp(0.0, 255.0) as u8;
-                pixels[idx + 2] = (col.2 * 255.0).clamp(0.0, 255.0) as u8;
-                pixels[idx + 3] = (norm * 225.0).clamp(30.0, 230.0) as u8;
-            }
-        }
-    }
-    with_alpha
-}
-
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
-    h.finish()
-}
-
-thread_local! {
-    static PIXBUF_CACHE: std::cell::RefCell<std::collections::HashMap<(u64, String, u8), gdk_pixbuf::Pixbuf>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-fn cached_tile_pixbuf(bytes: &[u8], theme_sig: &str, mode: u8) -> Option<gdk_pixbuf::Pixbuf> {
-    let key = (hash_bytes(bytes), theme_sig.to_string(), mode);
-    if let Some(pb) = PIXBUF_CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        return Some(pb);
-    }
-    let raw = decode_png_tile(bytes)?;
-    let processed = match mode {
-        1 => theme_tint_basemap_pixbuf(&raw),
-        2 => colorize_ir_pixbuf(&raw),
-        _ => raw,
-    };
-    PIXBUF_CACHE.with(|c| {
-        let mut map = c.borrow_mut();
-        if map.len() >= 144 {
-            map.clear();
-        }
-        map.insert(key, processed.clone());
-    });
-    Some(processed)
 }
 
 /// Interactive Radar, Satellite, Wind Streamlines, and Temperature/Isobar map canvas.
-#[allow(clippy::too_many_arguments)]
-pub fn draw_radar_map(
-    cr: &cairo::Context,
-    w: f64,
-    h: f64,
-    layer: RadarLayerKind,
-    grid: Option<&TileGridPayload>,
-    field: Option<&FieldGrid>,
-    snap: Option<&ForecastSnapshot>,
-    units: UnitPrefs,
-    opacity: f64,
-    anim_phase: f64,
-    pinch_scale: f64,
-    notice: Option<&str>,
-) {
+pub fn draw_radar_map(cr: &cairo::Context, w: f64, h: f64, scene: &MapScene) {
     let p = theme::palette();
     let wc = theme::weather_colors_for(&p);
     let bg = Rgb::hex(&p.bg);
@@ -778,66 +613,25 @@ pub fn draw_radar_map(
     let text = Rgb::hex(&p.text);
     let dim = Rgb::hex(&p.dim_text);
     let accent = Rgb::hex(&p.accent);
-    let theme_sig = format!("{}:{}:{}", p.bg, p.surface, p.accent);
+    let layer = scene.layer;
 
     // Base background
-    set_rgb(cr, surface.mix(bg, 0.5), 1.0);
+    set_rgb(cr, surface.mix(bg, 0.35), 1.0);
     cr.rectangle(0.0, 0.0, w, h);
     let _ = cr.fill();
 
     let cx = w * 0.5;
     let cy = h * 0.5;
-    let layout = grid.map(|g| MapLayout::new(g.center, w, h, pinch_scale));
+    let pinch = scene.geom.map_or(1.0, |g| g.pinch);
 
-    // 1. Draw 3×3 slippy map basemap + radar/satellite overlay tiles scaled uniformly
-    //    so the map always fills 100% of the canvas width & height while keeping 1:1 aspect ratio.
-    if let (Some(g), Some(l)) = (grid, layout) {
-        let MapLayout { tile_px, origin_x: center_origin_x, origin_y: center_origin_y, .. } = l;
-        let scale = (tile_px + 0.5) / 256.0;
-
-        cr.save().ok();
-        cr.rectangle(0.0, 0.0, w, h);
-        cr.clip();
-
-        for dy in -1i32..=1 {
-            for dx in -1i32..=1 {
-                let idx = ((dy + 1) * 3 + (dx + 1)) as usize;
-                let tx = center_origin_x + (dx as f64) * tile_px;
-                let ty = center_origin_y + (dy as f64) * tile_px;
-
-                if let Some(Some(base_bytes)) = g.basemap_tiles.get(idx)
-                    && let Some(themed_pb) = cached_tile_pixbuf(base_bytes, &theme_sig, 1)
-                {
-                    cr.save().ok();
-                    cr.translate(tx, ty);
-                    cr.scale(scale, scale);
-                    cr.set_source_pixbuf(&themed_pb, 0.0, 0.0);
-                    let _ = cr.paint();
-                    cr.restore().ok();
-                }
-
-                if matches!(
-                    layer,
-                    RadarLayerKind::PrecipitationRadar | RadarLayerKind::InfraredSatellite
-                ) && let Some(Some(ov_bytes)) = g.overlay_tiles.get(idx)
-                {
-                    let ov_mode = if layer == RadarLayerKind::InfraredSatellite {
-                        2
-                    } else {
-                        0
-                    };
-                    if let Some(ov_pb) = cached_tile_pixbuf(ov_bytes, &theme_sig, ov_mode) {
-                        cr.save().ok();
-                        cr.translate(tx, ty);
-                        cr.scale(scale, scale);
-                        cr.set_source_pixbuf(&ov_pb, 0.0, 0.0);
-                        let _ = cr.paint_with_alpha(opacity.clamp(0.15, 1.0));
-                        cr.restore().ok();
-                    }
-                }
-            }
-        }
-        cr.restore().ok();
+    // 1. The basemap, then the frames cross-faded: each at its weight, added in a group
+    //    (premultiplied, so that's an exact blend), the group at the layer's opacity.
+    cr.save().ok();
+    cr.translate(cx, cy);
+    cr.scale(pinch, pinch);
+    cr.translate(-cx, -cy);
+    if let Some(b) = scene.basemap {
+        paint_centered(cr, b, w, h, 1.0);
     } else {
         // Subtle cartographic graticule while tiles are loading
         set_rgb(cr, dim, 0.18);
@@ -852,17 +646,32 @@ pub fn draw_radar_map(
         }
         let _ = cr.stroke();
     }
+    if let Some((a, b, f)) = scene.frames {
+        cr.push_group();
+        cr.set_operator(cairo::Operator::Add);
+        let f = if b.is_some() { f.clamp(0.0, 1.0) } else { 0.0 };
+        paint_centered(cr, a, w, h, 1.0 - f);
+        if let Some(b) = b {
+            paint_centered(cr, b, w, h, f);
+        }
+        let _ = cr.pop_group_to_source();
+        cr.set_operator(cairo::Operator::Over);
+        let _ = cr.paint_with_alpha(scene.opacity.clamp(0.15, 1.0));
+    }
+    cr.restore().ok();
 
     // 2. Fields drawn from the 7×7 Open-Meteo grid: wind arrows, or temperature shading
     //    with isobars.
-    if let (Some(f), Some(l)) = (field, layout) {
+    if let (Some(f), Some(l)) = (scene.field, scene.geom) {
         match layer {
-            RadarLayerKind::WindStreamlines => draw_wind_field(cr, f, l, wc, units, opacity, anim_phase),
-            RadarLayerKind::TemperatureContour => draw_temp_field(cr, f, l, wc, text, units, opacity),
+            RadarLayerKind::WindStreamlines => draw_wind_field(cr, f, l, wc, scene.units, scene.opacity, scene.anim_phase),
+            RadarLayerKind::TemperatureContour => draw_temp_field(cr, f, l, wc, text, scene.units, scene.opacity),
             _ => {}
         }
     }
-
+    if layer == RadarLayerKind::PrecipitationRadar {
+        reflectivity_legend(cr, h);
+    }
     // 3. Center location target crosshair & live badge
     set_rgb(cr, wc.sun, 0.30);
     cr.arc(cx, cy, 14.0, 0.0, 2.0 * PI);
@@ -876,7 +685,8 @@ pub fn draw_radar_map(
     let _ = cr.stroke();
 
     // HUD overlay pill in top-left corner
-    if let Some(s) = snap {
+    let units = scene.units;
+    if let Some(s) = scene.snap {
         let hud_text = match layer {
             RadarLayerKind::PrecipitationRadar => format!(
                 "{} · Precip {}% · {}",
@@ -936,7 +746,7 @@ pub fn draw_radar_map(
     }
 
     // A note when the layer has nothing to show here (no radar coverage, field loading).
-    if let Some(n) = notice {
+    if let Some(n) = scene.notice {
         cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(11.0);
         let tw = cr.text_extents(n).map(|e| e.x_advance()).unwrap_or(0.0);
@@ -950,12 +760,7 @@ pub fn draw_radar_map(
     }
 
     // Map data credits, which the tile services ask for.
-    let credit = match layer {
-        RadarLayerKind::PrecipitationRadar | RadarLayerKind::InfraredSatellite => {
-            "© OpenStreetMap contributors · Radar: RainViewer, IEM"
-        }
-        _ => "© OpenStreetMap contributors · Data: Open-Meteo",
-    };
+    let credit = scene.credit;
     cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Normal);
     cr.set_font_size(9.5);
     let tw = cr.text_extents(credit).map(|e| e.x_advance()).unwrap_or(0.0);
@@ -967,57 +772,13 @@ pub fn draw_radar_map(
     let _ = cr.show_text(credit);
 }
 
-/// Where the 3×3 tile map sits on the canvas: the centre tile's size and its top-left
-/// corner, so a lat/lon can be placed on it.
-#[derive(Clone, Copy)]
-struct MapLayout {
-    center: nyx_weather_core::TileCoord,
-    tile_px: f64,
-    origin_x: f64,
-    origin_y: f64,
-}
-
-impl MapLayout {
-    fn new(center: nyx_weather_core::TileCoord, w: f64, h: f64, pinch_scale: f64) -> Self {
-        let cover_x = (1.0 + center.frac_x).min(2.0 - center.frac_x).max(0.5);
-        let cover_y = (1.0 + center.frac_y).min(2.0 - center.frac_y).max(0.5);
-        let min_cover_px = ((w * 0.5) / cover_x).max((h * 0.5) / cover_y).max(256.0);
-        let tile_px = (min_cover_px * 1.18 * pinch_scale.clamp(0.85, 2.0)).max(min_cover_px).ceil();
-        Self {
-            center,
-            tile_px,
-            origin_x: (w * 0.5 - center.frac_x * tile_px).floor(),
-            origin_y: (h * 0.5 - center.frac_y * tile_px).floor(),
-        }
-    }
-
-    /// Canvas position of (`lat`, `lon`).
-    fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
-        let n = (1u32 << self.center.z) as f64;
-        let xf = (lon + 180.0) / 360.0 * n;
-        let lat_rad = lat.clamp(-85.0511, 85.0511).to_radians();
-        let yf = (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / PI) / 2.0 * n;
-        (
-            self.origin_x + (xf - self.center.x as f64) * self.tile_px,
-            self.origin_y + (yf - self.center.y as f64) * self.tile_px,
-        )
-    }
-
-    /// Canvas position of grid position (`gx`, `gy`) of `f`.
-    fn project_grid(&self, f: &FieldGrid, gx: f64, gy: f64) -> (f64, f64) {
-        let max = (f.size - 1).max(1) as f64;
-        let b = f.bounds;
-        self.project(b.north + (b.south - b.north) * gy / max, b.west + (b.east - b.west) * gx / max)
-    }
-}
-
 /// Wind arrows over the map, from the grid interpolated as vectors: each points where
 /// the air is going, longer and warmer-coloured the stronger it blows, and drifts along
 /// its direction with `anim_phase`.
 fn draw_wind_field(
     cr: &cairo::Context,
     f: &FieldGrid,
-    l: MapLayout,
+    l: MapGeom,
     wc: theme::WeatherColors,
     units: UnitPrefs,
     opacity: f64,
@@ -1064,7 +825,7 @@ fn draw_wind_field(
 fn draw_temp_field(
     cr: &cairo::Context,
     f: &FieldGrid,
-    l: MapLayout,
+    l: MapGeom,
     wc: theme::WeatherColors,
     text: Rgb,
     units: UnitPrefs,
@@ -1140,4 +901,33 @@ fn legend(cr: &cairo::Context, label: &str, col: Rgb) {
     set_rgb(cr, Rgb::hex(&p.text), 0.95);
     cr.move_to(x + 20.0, y + 15.0);
     let _ = cr.show_text(label);
+}
+
+/// The radar key in the map's bottom-left corner: the NWS scale from light to heavy.
+fn reflectivity_legend(cr: &cairo::Context, h: f64) {
+    let p = theme::palette();
+    cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.set_font_size(10.5);
+    let (light, heavy) = ("Light", "Heavy");
+    let lw = cr.text_extents(light).map(|e| e.x_advance()).unwrap_or(0.0);
+    let hw = cr.text_extents(heavy).map(|e| e.x_advance()).unwrap_or(0.0);
+    let bar = 120.0;
+    let (x, y) = (12.0, h - 46.0);
+    set_rgb(cr, Rgb::hex(&p.bg), 0.84);
+    cr.rectangle(x, y, lw + bar + hw + 36.0, 22.0);
+    let _ = cr.fill();
+    set_rgb(cr, Rgb::hex(&p.text), 0.95);
+    cr.move_to(x + 10.0, y + 15.0);
+    let _ = cr.show_text(light);
+    let bx = x + 18.0 + lw;
+    for i in 0..bar as i32 {
+        let dbz = 15.0 + 60.0 * i as f32 / bar as f32;
+        let [r, g, b, _] = nws_color(Echo { dbz, snow: false });
+        cr.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+        cr.rectangle(bx + i as f64, y + 7.0, 1.0, 8.0);
+        let _ = cr.fill();
+    }
+    set_rgb(cr, Rgb::hex(&p.text), 0.95);
+    cr.move_to(bx + bar + 8.0, y + 15.0);
+    let _ = cr.show_text(heavy);
 }

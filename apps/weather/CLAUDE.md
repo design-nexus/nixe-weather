@@ -22,11 +22,17 @@
     request with `models=`; a model that doesn't answer is left out, a missing value is
     NaN), `fetch_field` (one multi-coordinate request), and the customer host when an
     API key is set.
-  - `field.rs`: the 7×7 wind/temperature/pressure grid over the 3×3 tile map, bilinear
+  - `field.rs`: the 7×7 wind/temperature/pressure grid over the map's view, bilinear
     sampling, vector wind, marching-squares contours.
-  - `radar.rs`: RainViewer manifest and tiles (zoom ≤ `RAINVIEWER_MAX_ZOOM`), IEM tiles
-    above that and as the satellite fallback (5-minute TTL; RainViewer URLs carry their
-    time), OSM basemap.
+  - `radar.rs`: a map is a `TileView` (the tiles covering the canvas at native size; the
+    OSM basemap one zoom in on HiDPI). Radar for US places is IEM's NEXRAD mosaic
+    (`iem_radar_frames`: 13 frames 5 minutes apart, times worked out locally, any zoom,
+    `/c/` timestamped URLs); elsewhere RainViewer's past frames (10 minutes, 512 px tiles
+    one zoom out, zoom ≤ `RAINVIEWER_MAX_ZOOM`, kept under 90 requests a minute by
+    `RateLimit`). Satellite is IEM's latest GOES-East IR. Tiles are fetched 12 at a time.
+  - `reflectivity.rs`: RainViewer's Universal Blue (rain and snow) and IEM's N0Q colour
+    tables, read back to dBZ (every tile pixel is a table colour; others take the
+    nearest), and the classic NWS scale they're redrawn in.
   - `cache.rs`: SQLite `weather.db`. Schema changes go through `VERSION` and run once on
     open. Tiles are evicted per kind (basemap / everything else); fields share the tile
     table under `field:` keys.
@@ -38,6 +44,13 @@
   hidden Radar page's timers stop. Theme changes don't rebuild pages: charts and the map
   `theme::subscribe` and redraw. `notify.rs`: Severe/Extreme alert notifications, ids
   remembered in prefs.
+- Radar page (`sections/radar.rs`, `maprender.rs`): workers compose the basemap (device
+  resolution) and one picture per frame (canvas resolution) as `Raster`s; the GTK thread
+  only paints them. A scene (zoom, layer, size, scale) is composed once; frames load
+  newest first, one at a time, and `generation` drops work for an older scene. Playback
+  runs on the frame clock (0.7 s per 10 minutes of weather, a 1.5 s rest on the newest),
+  cross-fading frame pairs with `Operator::Add` in a group; Reduce motion steps instead.
+  Resizes recompose only when the canvas outgrows the pictures.
 - Floating mode writes the rule into `~/.config/hypr/nyx.lua` and reloads Hyprland; the
   installer always `require`s that file when Weather is installed.
 - `plugin/`: the omarchy-shell bar widget (polls `nyx-weather --waybar`).

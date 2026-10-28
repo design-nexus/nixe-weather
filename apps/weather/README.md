@@ -13,11 +13,12 @@ you save, in a GTK 4 window.
   rain, wind and gusts, humidity and cloud cover, and surface pressure; hover a chart for
   its values. An hour-by-hour table follows.
 - **10-Day Outlook:** a high, low and rain chart and a card for each day.
-- **Radar & Overlays:** a map with four layers: RainViewer radar for the past two hours
-  (closer in, the US NEXRAD mosaic), infrared satellite, and the current wind and the
+- **Radar & Overlays:** a map with four layers: radar on the classic NWS scale (in the US
+  the NOAA NEXRAD mosaic, a frame every 5 minutes for the past hour; elsewhere RainViewer,
+  every 10 minutes for the past two hours), infrared satellite, and the current wind and the
   temperature with sea-level isobars, both drawn from a 7×7 grid of Open-Meteo points over
   the map. Zoom with the buttons, Ctrl+scroll, a double-click or a pinch; play the radar
-  loop; set the overlay's opacity.
+  loop, which fades smoothly from frame to frame; set the overlay's opacity.
 - **Air Quality & Pollen:** US AQI and European EAQI with guidance, a 24-hour AQI and PM2.5
   chart, particulates and trace gases, pollen (forecast for Europe only), and UV.
 - **Sun, Moon & Models:** the sun's path and daylight, the moon's phase, and each day's
@@ -80,7 +81,8 @@ nyx-weather --refresh            Refresh every saved place and exit
 - Forecasts, air quality, geocoding and the map grids: [Open-Meteo](https://open-meteo.com/),
   CC BY 4.0. The free service is for non-commercial use; with an API key (Settings →
   Units & forecast) requests go to Open-Meteo's customer servers, or point it at your own.
-- Radar and satellite: [RainViewer](https://www.rainviewer.com/api.html) and the
-  [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/).
+- Radar and satellite: NOAA NEXRAD and GOES via the
+  [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/), and
+  [RainViewer](https://www.rainviewer.com/api.html) outside the US.
 - Map: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
 - US alerts: [NOAA / National Weather Service](https://www.weather.gov/documentation/services-web-api).

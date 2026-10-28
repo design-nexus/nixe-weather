@@ -891,7 +891,7 @@ pub fn restart_refresh_timer() {
 pub fn refresh_active(force: bool) {
     let p = prefs::get();
     let Some(loc) = p.active_location() else { return };
-    backend::prewarm_radar(loc.latitude, loc.longitude);
+    backend::prewarm_radar(&loc, window().map_or(1, |w| w.scale_factor()));
 
     // Show cached forecast immediately while worker checks/fetches
     if let Some(cached) = backend::get_cached(&loc.id)

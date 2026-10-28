@@ -1,15 +1,24 @@
-//! Radar & Overlays section: RainViewer radar and infrared satellite tiles, and the
-//! current wind, temperature and isobars over the map from a grid of Open-Meteo points.
+//! Radar & Overlays section: radar (the NOAA NEXRAD mosaic via IEM for US places,
+//! RainViewer elsewhere) and infrared satellite over the basemap, and the current wind,
+//! temperature and isobars from a grid of Open-Meteo points.
+//!
+//! The map is composed off the GTK thread at native resolution ([`crate::maprender`]):
+//! one basemap picture and one picture per radar frame, all loaded (newest first) when
+//! the page opens. Playback runs on the frame clock and cross-fades each frame into the
+//! next.
 
+use crate::charts::{self, MapScene};
+use crate::maprender::{self, BasemapColors, MapGeom, Recolor};
 use crate::widgets::{self, Page};
-use crate::{backend, charts, cmd, prefs, theme};
-use gtk::glib;
+use crate::{backend, cmd, prefs, theme};
 use gtk::prelude::*;
+use gtk::{cairo, glib};
 use nyx_weather_core::{
-    FieldGrid, ForecastSnapshot, RAINVIEWER_MAX_ZOOM, RadarFrame, RadarLayerKind, RadarManifest,
-    TileGridPayload, cardinal_direction,
+    FieldGrid, ForecastSnapshot, Location, OpenMeteoConfig, RAINVIEWER_MAX_ZOOM, RadarClient, RadarFrame,
+    RadarLayerKind, RadarManifest, TileView, cardinal_direction, iem_radar_frames, iem_satellite_frame,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -18,27 +27,448 @@ thread_local! {
     static ZOOM: Cell<u8> = const { Cell::new(6) };
 }
 
+/// Seconds of playback per 10 minutes of weather; 5-minute frames step twice as often.
+const SECS_PER_TEN_MINUTES: f64 = 0.7;
+/// How long the loop rests on the newest frame before starting again.
+const HOLD_SECS: f64 = 1.5;
+
+/// What the composed pictures were made for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SceneKey {
+    zoom: u8,
+    layer: RadarLayerKind,
+    w: i32,
+    h: i32,
+    scale: i32,
+}
+
 #[derive(Default)]
 struct RadarViewState {
     layer: RadarLayerKind,
     zoom: u8,
     opacity: f64,
     manifest: Option<RadarManifest>,
-    frame_idx: usize,
+    /// The frames the layer shows, oldest first (one for satellite, none for fields).
+    frames: Vec<RadarFrame>,
+    /// Where playback is, in frames; fractional while one fades into the next.
+    pos: f64,
     playing: bool,
+    /// Seconds left resting on the newest frame.
+    hold: f64,
+    ticking: bool,
+    last_tick: Option<i64>,
     anim_phase: f64,
     pinch_scale: f64,
-    grid: Option<TileGridPayload>,
-    /// The wind/temperature/pressure grid, and the zoom it was fetched for.
-    field: Option<(u8, FieldGrid)>,
+    scene: Option<SceneKey>,
+    basemap: Option<cairo::ImageSurface>,
+    /// Each frame's composed picture, by frame time.
+    overlays: HashMap<i64, cairo::ImageSurface>,
+    /// The wind/temperature/pressure grid, and the view it was fetched for.
+    field: Option<(String, FieldGrid)>,
     /// What the map can't show here, drawn over it.
     notice: Option<String>,
-    play_timer: Option<glib::SourceId>,
+    /// Bumped when the scene changes, so work for an older one is dropped.
+    generation: u64,
+    /// Frames composed so far, while loading.
+    loading: Option<(usize, usize)>,
+}
+
+impl RadarViewState {
+    /// The first frame of the run of composed frames that ends with the newest: the
+    /// loop plays those while the older ones load.
+    fn ready_start(&self) -> usize {
+        let mut start = self.frames.len();
+        while start > 0 && self.overlays.contains_key(&self.frames[start - 1].time) {
+            start -= 1;
+        }
+        start.min(self.frames.len().saturating_sub(1))
+    }
+
+    /// The pictures to show at `pos`: the frame, the next one and the fade between
+    /// them (none when reducing motion), falling back to the nearest composed frame.
+    fn frames_at(&self, reduce_motion: bool) -> Option<(&cairo::ImageSurface, Option<&cairo::ImageSurface>, f64)> {
+        let n = self.frames.len();
+        if n == 0 {
+            return None;
+        }
+        let i = (self.pos.floor().max(0.0) as usize).min(n - 1);
+        let f = self.pos - i as f64;
+        let get = |j: usize| self.frames.get(j).and_then(|fr| self.overlays.get(&fr.time));
+        let a = get(i).or_else(|| (0..n).rev().filter_map(get).next())?;
+        let b = (!reduce_motion && f > 0.001).then(|| get(i + 1)).flatten();
+        Some((a, b, f))
+    }
+
+    /// The seconds of playback one frame takes.
+    fn secs_per_frame(&self) -> f64 {
+        let step = match self.frames.as_slice() {
+            [a, b, ..] => (b.time - a.time).max(60) as f64,
+            _ => 600.0,
+        };
+        SECS_PER_TEN_MINUTES * step / 600.0
+    }
+
+    fn advance(&mut self, dt: f64) {
+        let n = self.frames.len();
+        if n < 2 || self.overlays.is_empty() {
+            return;
+        }
+        let start = self.ready_start() as f64;
+        if self.hold > 0.0 {
+            self.hold -= dt;
+            if self.hold <= 0.0 {
+                self.pos = start;
+            }
+            return;
+        }
+        self.pos = (self.pos + dt / self.secs_per_frame()).max(start);
+        if self.pos >= (n - 1) as f64 {
+            self.pos = (n - 1) as f64;
+            self.hold = HOLD_SECS;
+        }
+    }
 }
 
 /// True for a tile layer (radar or satellite) rather than a field drawn from points.
 fn is_tile_layer(layer: RadarLayerKind) -> bool {
     matches!(layer, RadarLayerKind::PrecipitationRadar | RadarLayerKind::InfraredSatellite)
+}
+
+/// Everything the page's handlers share.
+struct Ctx {
+    state: Rc<RefCell<RadarViewState>>,
+    canvas: gtk::DrawingArea,
+    loc: Location,
+    cfg: OpenMeteoConfig,
+    utc_offset: i64,
+    frame_slider: gtk::Scale,
+    frame_time_lbl: gtk::Label,
+    desc_lbl: gtk::Label,
+    zoom_lbl: gtk::Label,
+    /// Set while the slider is moved by playback, not the user.
+    syncing: Cell<bool>,
+    resize_timer: RefCell<Option<glib::SourceId>>,
+}
+
+impl Ctx {
+    /// The closest zoom this layer allows here: NEXRAD reaches street level in the US;
+    /// elsewhere radar stops where RainViewer does.
+    fn max_zoom(&self) -> u8 {
+        if self.state.borrow().layer == RadarLayerKind::PrecipitationRadar && !self.loc.is_us() {
+            RAINVIEWER_MAX_ZOOM
+        } else {
+            10
+        }
+    }
+
+    fn set_zoom(self: &Rc<Self>, z: u8) {
+        let z = z.clamp(4, self.max_zoom());
+        {
+            let mut st = self.state.borrow_mut();
+            st.pinch_scale = 1.0;
+            if st.zoom == z {
+                return;
+            }
+            st.zoom = z;
+        }
+        ZOOM.with(|c| c.set(z));
+        self.zoom_lbl.set_text(&format!("Z{z}"));
+        self.load_scene();
+    }
+
+    fn zoom_by(self: &Rc<Self>, by: i32) {
+        let z = self.state.borrow().zoom as i32 + by;
+        self.set_zoom(z.clamp(4, 12) as u8);
+    }
+
+    /// The layer's frames for this place, oldest first.
+    fn frames_for(&self, layer: RadarLayerKind, manifest: Option<&RadarManifest>) -> Vec<RadarFrame> {
+        match layer {
+            RadarLayerKind::PrecipitationRadar if self.loc.is_us() => iem_radar_frames(backend::now_epoch()),
+            RadarLayerKind::PrecipitationRadar => {
+                manifest.map(|m| m.radar_frames.iter().filter(|f| !f.is_nowcast).cloned().collect()).unwrap_or_default()
+            }
+            RadarLayerKind::InfraredSatellite => vec![iem_satellite_frame(backend::now_epoch())],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The data credits for what's on the map.
+    fn credit(&self, layer: RadarLayerKind) -> &'static str {
+        match layer {
+            RadarLayerKind::PrecipitationRadar if self.loc.is_us() => "© OpenStreetMap contributors · Radar: NOAA via IEM",
+            RadarLayerKind::PrecipitationRadar => "© OpenStreetMap contributors · Radar: RainViewer",
+            RadarLayerKind::InfraredSatellite => "© OpenStreetMap contributors · Satellite: NOAA GOES via IEM",
+            _ => "© OpenStreetMap contributors · Data: Open-Meteo",
+        }
+    }
+
+    fn description(&self, layer: RadarLayerKind) -> &'static str {
+        match layer {
+            RadarLayerKind::PrecipitationRadar if self.loc.is_us() => {
+                "The NOAA NEXRAD mosaic via IEM: a frame every 5 minutes for the past hour, on the classic NWS scale (dBZ)."
+            }
+            RadarLayerKind::PrecipitationRadar => {
+                "RainViewer's radar composite: a frame every 10 minutes for the past two hours, on the classic NWS scale (dBZ)."
+            }
+            other => other.description(),
+        }
+    }
+
+    /// The canvas size to compose for, and its device scale.
+    fn canvas_size(&self) -> (i32, i32, i32) {
+        let (w, h) = (self.canvas.width(), self.canvas.height());
+        let (w, h) = if w > 0 && h > 0 { (w, h) } else { (900, 520) };
+        (w, h, self.canvas.scale_factor().max(1))
+    }
+
+    /// Compose the map for the current zoom, layer and size: the basemap, the frames
+    /// (newest first) or the field. Does nothing when the pictures already fit.
+    fn load_scene(self: &Rc<Self>) {
+        let (w, h, scale) = self.canvas_size();
+        let (key, generation, keep_basemap, layer, zoom) = {
+            let mut st = self.state.borrow_mut();
+            let key = SceneKey { zoom: st.zoom, layer: st.layer, w, h, scale };
+            // A smaller canvas shows the middle of what's there.
+            let fits = st.scene.is_some_and(|k| {
+                k.zoom == key.zoom && k.layer == key.layer && k.scale == key.scale && w <= k.w && h <= k.h
+            });
+            if fits {
+                drop(st);
+                self.update_timeline();
+                self.canvas.queue_draw();
+                return;
+            }
+            let keep_basemap = st.basemap.is_some()
+                && st.scene.is_some_and(|k| k.zoom == key.zoom && k.scale == key.scale && w <= k.w && h <= k.h);
+            st.generation += 1;
+            st.scene = Some(key);
+            if !keep_basemap {
+                st.basemap = None;
+            }
+            st.overlays.clear();
+            st.frames = self.frames_for(st.layer, st.manifest.as_ref());
+            st.pos = st.frames.len().saturating_sub(1) as f64;
+            st.hold = 0.0;
+            st.loading = None;
+            st.notice = match st.layer {
+                RadarLayerKind::PrecipitationRadar if st.zoom > RAINVIEWER_MAX_ZOOM && !self.loc.is_us() => {
+                    Some("Radar this close in covers the US only — zoom out".to_string())
+                }
+                // The satellite imagery is GOES-East: the Americas.
+                RadarLayerKind::InfraredSatellite if !(-170.0..=-20.0).contains(&self.loc.longitude) => {
+                    Some("Satellite imagery isn't available here".to_string())
+                }
+                RadarLayerKind::PrecipitationRadar if st.frames.is_empty() => Some("Loading radar…".to_string()),
+                _ => None,
+            };
+            (key, st.generation, keep_basemap, st.layer, st.zoom)
+        };
+        self.desc_lbl.set_text(self.description(layer));
+        self.update_timeline();
+        self.canvas.queue_draw();
+
+        let (lat, lon) = (self.loc.latitude, self.loc.longitude);
+        let geom = MapGeom::new(lat, lon, zoom, w as f64, h as f64, 1.0);
+        if !keep_basemap {
+            let base_z = if scale >= 2 { (zoom + 1).min(12) } else { zoom };
+            let view = TileView::covering(lat, lon, zoom, base_z, w as f64, h as f64);
+            self.load_basemap(generation, view, geom, scale as f64);
+        }
+        if is_tile_layer(layer) {
+            let n = self.state.borrow().frames.len();
+            if n > 0 {
+                self.state.borrow_mut().loading = Some((0, n));
+                self.update_timeline();
+                self.load_frame(generation, geom, (0..n).rev().collect(), 0);
+            }
+        } else {
+            self.load_field(TileView::covering(lat, lon, zoom, zoom, key.w as f64, key.h as f64));
+        }
+    }
+
+    /// The basemap: what's cached at once, then the rest from the network.
+    fn load_basemap(self: &Rc<Self>, generation: u64, view: TileView, geom: MapGeom, scale: f64) {
+        let colors = Recolor::Basemap(BasemapColors::current());
+        let me = self.clone();
+        cmd::background(
+            move || {
+                let urls = RadarClient::basemap_urls(&view);
+                let tiles = backend::cached_tiles(&urls);
+                let complete = tiles.iter().zip(&urls).all(|(t, u)| t.is_some() || u.is_none());
+                (maprender::compose(&view, &tiles, &geom, scale, &colors), complete)
+            },
+            move |(raster, complete)| {
+                if me.state.borrow().generation != generation {
+                    return;
+                }
+                if let Some(s) = raster.and_then(maprender::Raster::into_surface) {
+                    me.state.borrow_mut().basemap = Some(s);
+                    me.canvas.queue_draw();
+                }
+                if complete {
+                    return;
+                }
+                let me2 = me.clone();
+                cmd::background(
+                    move || maprender::compose(&view, &backend::fetch_tiles(&RadarClient::basemap_urls(&view)), &geom, scale, &colors),
+                    move |raster| {
+                        if me2.state.borrow().generation != generation {
+                            return;
+                        }
+                        if let Some(s) = raster.and_then(maprender::Raster::into_surface) {
+                            me2.state.borrow_mut().basemap = Some(s);
+                            me2.canvas.queue_draw();
+                        }
+                    },
+                );
+            },
+        );
+    }
+
+    /// Frame `order[k]` (then the rest, one after another, so the newest shows first and
+    /// a slow network never has more than one frame in flight).
+    fn load_frame(self: &Rc<Self>, generation: u64, geom: MapGeom, order: Vec<usize>, k: usize) {
+        let Some(&idx) = order.get(k) else { return };
+        let (frame, host) = {
+            let st = self.state.borrow();
+            let Some(f) = st.frames.get(idx).cloned() else { return };
+            (f, st.manifest.as_ref().map(|m| m.host.clone()).unwrap_or_default())
+        };
+        let view =
+            TileView::covering(self.loc.latitude, self.loc.longitude, geom.z, frame.tile_zoom(geom.z), geom.w, geom.h);
+        let recolor = match frame.palette() {
+            Some(p) => Recolor::Radar(p),
+            None => Recolor::infrared(),
+        };
+        let time = frame.time;
+        let me = self.clone();
+        cmd::background(
+            move || {
+                let tiles = backend::fetch_tiles(&RadarClient::overlay_urls(&view, &host, &frame));
+                let empty = tiles.iter().all(Option::is_none);
+                (maprender::compose(&view, &tiles, &geom, 1.0, &recolor), empty)
+            },
+            move |(raster, empty)| {
+                {
+                    let mut st = me.state.borrow_mut();
+                    if st.generation != generation {
+                        return;
+                    }
+                    if let Some(s) = raster.and_then(maprender::Raster::into_surface) {
+                        st.overlays.insert(time, s);
+                    } else if k == 0 && empty && st.notice.is_none() {
+                        st.notice = Some("No radar or satellite tiles for this view".into());
+                    }
+                    let total = order.len();
+                    st.loading = (k + 1 < total).then_some((k + 1, total));
+                }
+                me.update_timeline();
+                me.canvas.queue_draw();
+                me.load_frame(generation, geom, order, k + 1);
+            },
+        );
+    }
+
+    /// The wind and temperature grid over `view`, unless it's already there.
+    fn load_field(self: &Rc<Self>, view: TileView) {
+        let key = view.key();
+        if self.state.borrow().field.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        self.state.borrow_mut().notice = Some("Loading the wind and temperature grid…".into());
+        self.canvas.queue_draw();
+        let (me, cfg) = (self.clone(), self.cfg.clone());
+        cmd::background(
+            move || backend::fetch_field(&view, &cfg),
+            move |res| {
+                let mut st = me.state.borrow_mut();
+                match res {
+                    Ok(grid) => {
+                        st.field = Some((key, grid));
+                        if !is_tile_layer(st.layer) {
+                            st.notice = None;
+                        }
+                    }
+                    Err(e) if !is_tile_layer(st.layer) => st.notice = Some(e.to_string()),
+                    Err(_) => {}
+                }
+                drop(st);
+                me.canvas.queue_draw();
+                me.ensure_ticking();
+            },
+        );
+    }
+
+    /// The slider and the time beside it, following playback.
+    fn update_timeline(&self) {
+        let st = self.state.borrow();
+        let n = st.frames.len();
+        let tile = is_tile_layer(st.layer);
+        self.syncing.set(true);
+        if tile && n > 1 {
+            self.frame_slider.set_range(0.0, (n - 1) as f64);
+            self.frame_slider.set_value(st.pos);
+            self.frame_slider.set_sensitive(true);
+        } else {
+            self.frame_slider.set_sensitive(false);
+        }
+        self.syncing.set(false);
+        let text = if let Some((done, total)) = st.loading {
+            format!("Loading {done} of {total}")
+        } else if tile && n > 0 {
+            let i = (st.pos.floor().max(0.0) as usize).min(n - 1);
+            let f = st.pos - i as f64;
+            let t0 = st.frames[i].time;
+            let t1 = st.frames.get(i + 1).map_or(t0, |fr| fr.time);
+            let t = t0 + ((t1 - t0) as f64 * f) as i64;
+            let local = nyx_weather_core::local_time(t, self.utc_offset as i32);
+            let time = if prefs::get().use_24h_time { local.format("%H:%M") } else { local.format("%-I:%M %p") };
+            format!("Observed · {time}")
+        } else {
+            st.layer.label().to_string()
+        };
+        if self.frame_time_lbl.text() != text {
+            self.frame_time_lbl.set_text(&text);
+        }
+    }
+
+    /// Run the frame clock while something moves: playback, or the wind arrows.
+    fn ensure_ticking(self: &Rc<Self>) {
+        {
+            let mut st = self.state.borrow_mut();
+            if st.ticking {
+                return;
+            }
+            st.ticking = true;
+            st.last_tick = None;
+        }
+        let me = self.clone();
+        self.canvas.add_tick_callback(move |_, clock| {
+            let now = clock.frame_time();
+            let reduce = prefs::get().reduce_motion;
+            {
+                let mut st = me.state.borrow_mut();
+                let dt = st.last_tick.map_or(0.0, |t| (now - t) as f64 / 1e6).clamp(0.0, 0.25);
+                st.last_tick = Some(now);
+                let wind = st.layer == RadarLayerKind::WindStreamlines && st.field.is_some() && !reduce;
+                let playing = st.playing && is_tile_layer(st.layer) && st.frames.len() > 1;
+                if !wind && !playing {
+                    st.ticking = false;
+                    return glib::ControlFlow::Break;
+                }
+                if wind {
+                    st.anim_phase = (st.anim_phase + dt * 0.39).fract();
+                }
+                if playing {
+                    st.advance(dt);
+                }
+            }
+            me.update_timeline();
+            me.canvas.queue_draw();
+            glib::ControlFlow::Continue
+        });
+    }
 }
 
 pub fn build(
@@ -69,22 +499,9 @@ pub fn build(
         layer: RadarLayerKind::from_id(&p.default_radar_layer),
         zoom: ZOOM.with(Cell::get),
         opacity: (p.radar_opacity_pct.clamp(35, 100) as f64) / 100.0,
-        manifest: None,
-        frame_idx: 0,
-        playing: false,
-        anim_phase: 0.0,
         pinch_scale: 1.0,
-        grid: None,
-        field: None,
-        notice: None,
-        play_timer: None,
+        ..Default::default()
     }));
-    // Radar closer in than RainViewer's range is the NEXRAD mosaic, which covers the US.
-    let max_zoom = {
-        let us = loc.is_us();
-        let state = state.clone();
-        move || if state.borrow().layer == RadarLayerKind::PrecipitationRadar && !us { RAINVIEWER_MAX_ZOOM } else { 10 }
-    };
 
     // The page doesn't scroll: the map takes the height the window has left after
     // its controls, so the map, the toolbar and the timeline are always in view.
@@ -115,21 +532,10 @@ pub fn build(
         state.borrow().layer.id(),
         {
             let state = state.clone();
-            let desc_lbl = desc_lbl.clone();
             move |id| {
                 let kind = RadarLayerKind::from_id(&id);
                 prefs::update(|pr| pr.default_radar_layer = id);
-                {
-                    let mut st = state.borrow_mut();
-                    st.layer = kind;
-                    if let Some(m) = &st.manifest {
-                        let frames = active_frames(m, kind);
-                        if !frames.is_empty() {
-                            st.frame_idx = frames.len().saturating_sub(1);
-                        }
-                    }
-                }
-                desc_lbl.set_text(kind.description());
+                state.borrow_mut().layer = kind;
             }
         },
     );
@@ -166,50 +572,19 @@ pub fn build(
     toolbar.append(&details_btn);
     g_map.add(&toolbar);
 
-    // 2. Interactive Radar & Overlay Canvas: fills the card's width and the height
-    // left over; the tiles scale to cover any shape.
+    // 2. The map: fills the card's width and the height left over.
     let canvas = gtk::DrawingArea::new();
     canvas.set_content_height(MAP_MIN_HEIGHT);
     canvas.set_hexpand(true);
     canvas.set_vexpand(true);
     canvas.add_css_class("radar-canvas");
 
-    let c_weak = canvas.downgrade();
-    theme::subscribe(&canvas, move || {
-        if let Some(c) = c_weak.upgrade() {
-            c.queue_draw();
-        }
-    });
-
-    let snap_owned = snap.cloned();
-    {
-        let state = state.clone();
-        let snap_owned = snap_owned.clone();
-        canvas.set_draw_func(move |_, cr, w, h| {
-            let st = state.borrow();
-            let field = st.field.as_ref().filter(|(z, _)| *z == st.zoom).map(|(_, f)| f);
-            charts::draw_radar_map(
-                cr,
-                w as f64,
-                h as f64,
-                st.layer,
-                st.grid.as_ref(),
-                field,
-                snap_owned.as_ref(),
-                units,
-                st.opacity,
-                st.anim_phase,
-                st.pinch_scale,
-                st.notice.as_deref(),
-            );
-        });
-    }
     let map = gtk::Overlay::new();
     map.set_child(Some(&canvas));
     map.add_overlay(&map_zoom);
     g_map.add(&map);
 
-    // 3. Timeline Scrubber & Opacity Bar
+    // 3. Timeline Scrubber
     let timeline_row = widgets::hbox(10);
     timeline_row.add_css_class("radar-timeline-row");
 
@@ -227,6 +602,20 @@ pub fn build(
     timeline_row.append(&frame_time_lbl);
 
     g_map.add(&timeline_row);
+
+    let ctx = Rc::new(Ctx {
+        state: state.clone(),
+        canvas: canvas.clone(),
+        loc: loc.clone(),
+        cfg: p.open_meteo_config(),
+        utc_offset,
+        frame_slider: frame_slider.clone(),
+        frame_time_lbl: frame_time_lbl.clone(),
+        desc_lbl: desc_lbl.clone(),
+        zoom_lbl: zoom_lbl.clone(),
+        syncing: Cell::new(false),
+        resize_timer: RefCell::new(None),
+    });
 
     // Opacity row
     let (opacity_row, _) = widgets::slider_row(
@@ -249,216 +638,84 @@ pub fn build(
     );
     details.append(&opacity_row);
 
-    // Helper closure to fetch the 3×3 tile grid for the current state
-    let request_tiles: Rc<dyn Fn()> = {
-        let state = state.clone();
-        let canvas = canvas.clone();
-        let frame_time_lbl = frame_time_lbl.clone();
-        let frame_slider = frame_slider.clone();
-        let loc = loc.clone();
-        let updating_slider = Rc::new(Cell::new(false));
-        let cfg = p.open_meteo_config();
-
-        Rc::new(move || {
-            let (layer, zoom, frame_opt, host, total_frames, idx) = {
-                let st = state.borrow();
-                let (f_opt, host, total, idx) = if let Some(m) = &st.manifest {
-                    let frames = active_frames(m, st.layer);
-                    let clamped_idx = st.frame_idx.min(frames.len().saturating_sub(1));
-                    (
-                        frames.get(clamped_idx).cloned(),
-                        m.host.clone(),
-                        frames.len(),
-                        clamped_idx,
-                    )
-                } else {
-                    (None, "https://tilecache.rainviewer.com".to_string(), 0, 0)
-                };
-                (st.layer, st.zoom, f_opt, host, total, idx)
-            };
-            ZOOM.with(|z| z.set(zoom));
-
-            if total_frames > 1 {
-                updating_slider.set(true);
-                frame_slider.set_range(0.0, (total_frames - 1) as f64);
-                frame_slider.set_value(idx as f64);
-                updating_slider.set(false);
-                frame_slider.set_sensitive(is_tile_layer(layer));
-            } else {
-                frame_slider.set_sensitive(false);
-            }
-
-            // Above RainViewer's zoom, radar is the latest NEXRAD image (no history).
-            let live_only = layer == RadarLayerKind::PrecipitationRadar && zoom > RAINVIEWER_MAX_ZOOM;
-            if live_only {
-                frame_slider.set_sensitive(false);
-                frame_time_lbl.set_text("Latest · NEXRAD");
-            } else if let Some(f) = &frame_opt
-                && is_tile_layer(layer)
-            {
-                // In the location's own time.
-                let local = nyx_weather_core::local_time(f.time, utc_offset as i32);
-                let dt_str = if prefs::get().use_24h_time {
-                    local.format("%H:%M").to_string()
-                } else {
-                    local.format("%-I:%M %p").to_string()
-                };
-                let tag = if f.is_nowcast { "Nowcast" } else { "Observed" };
-                frame_time_lbl.set_text(&format!("{tag} · {dt_str}"));
-            } else {
-                frame_time_lbl.set_text(layer.label());
-            }
-
-            let lat = loc.latitude;
-            let lon = loc.longitude;
-
-            // What this layer can't show for this place.
-            let sat_fallback = frame_opt.as_ref().is_some_and(|f| f.path.starts_with("iem:"));
-            let notice = match layer {
-                RadarLayerKind::PrecipitationRadar if zoom > RAINVIEWER_MAX_ZOOM && !loc.is_us() => {
-                    Some("Radar this close in covers the US only — zoom out".to_string())
-                }
-                // The fallback imagery is GOES-East: the Americas.
-                RadarLayerKind::InfraredSatellite if sat_fallback && !(-170.0..=-20.0).contains(&lon) => {
-                    Some("Satellite imagery isn't available here".to_string())
-                }
-                _ => None,
-            };
-            state.borrow_mut().notice = notice;
-
-            // Wind and temperature come from a grid of points over the map.
-            if !is_tile_layer(layer) {
-                let have = state.borrow().field.as_ref().is_some_and(|(z, _)| *z == zoom);
-                if !have {
-                    state.borrow_mut().notice = Some("Loading the wind and temperature grid…".into());
-                    let (state_f, canvas_f, cfg) = (state.clone(), canvas.clone(), cfg.clone());
-                    cmd::background(
-                        move || backend::fetch_field(lat, lon, zoom, &cfg),
-                        move |res| {
-                            let mut st = state_f.borrow_mut();
-                            match res {
-                                Ok(grid) => {
-                                    st.field = Some((zoom, grid));
-                                    if !is_tile_layer(st.layer) {
-                                        st.notice = None;
-                                    }
-                                }
-                                Err(e) if !is_tile_layer(st.layer) => st.notice = Some(e.to_string()),
-                                Err(_) => {}
-                            }
-                            drop(st);
-                            canvas_f.queue_draw();
-                        },
-                    );
-                }
-            }
-
-            // 1. Synchronous SQLite cache lookup (< 1ms): render cached basemap/overlay immediately!
-            if let Some(cached) =
-                backend::get_cached_radar_grid(lat, lon, zoom, &host, frame_opt.as_ref(), layer)
-            {
-                let mut st = state.borrow_mut();
-                if st.zoom == zoom {
-                    st.grid = Some(cached);
-                    drop(st);
-                    canvas.queue_draw();
-                }
-            }
-
-            let need_basemap = {
-                let st = state.borrow();
-                match &st.grid {
-                    Some(g) if g.center.z == zoom => g.basemap_tiles.iter().any(|t| t.is_none()),
-                    _ => true,
-                }
-            };
-
-            // 2. Fetch background basemap first (if not already complete in cache) and render immediately
-            if need_basemap {
-                let state_base = state.clone();
-                let canvas_base = canvas.clone();
-                cmd::background(
-                    move || backend::fetch_basemap_grid(lat, lon, zoom),
-                    move |base_grid| {
-                        let mut st = state_base.borrow_mut();
-                        if st.zoom == zoom {
-                            match &mut st.grid {
-                                Some(existing) if existing.center.z == zoom => {
-                                    existing.basemap_tiles = base_grid.basemap_tiles;
-                                }
-                                _ => {
-                                    st.grid = Some(base_grid);
-                                }
-                            }
-                            drop(st);
-                            canvas_base.queue_draw();
-                        }
-                    },
-                );
-            }
-
-            // 3. Layer radar / satellite overlay tiles on top of the basemap
-            if is_tile_layer(layer) {
-                let state_ov = state.clone();
-                let canvas_ov = canvas.clone();
-                let frame_time = frame_opt.as_ref().map(|f| f.time);
-                let is_nowcast = frame_opt.as_ref().is_some_and(|f| f.is_nowcast);
-                cmd::background(
-                    move || {
-                        backend::fetch_overlay_tiles(
-                            lat,
-                            lon,
-                            zoom,
-                            &host,
-                            frame_opt.as_ref(),
-                            layer,
-                        )
-                    },
-                    move |ov_tiles| {
-                        let mut st = state_ov.borrow_mut();
-                        // Only the frame still selected (a quick Play can overtake a fetch).
-                        let current = st
-                            .manifest
-                            .as_ref()
-                            .and_then(|m| active_frames(m, st.layer).get(st.frame_idx).map(|f| f.time));
-                        if st.zoom == zoom && st.layer == layer && (frame_time.is_none() || current == frame_time) {
-                            if ov_tiles.iter().all(Option::is_none) && st.notice.is_none() {
-                                st.notice = Some("No radar or satellite tiles for this view".into());
-                            }
-                            if let Some(existing) = &mut st.grid
-                                && existing.center.z == zoom
-                            {
-                                existing.overlay_tiles = ov_tiles;
-                                existing.frame_time = frame_time;
-                                existing.is_nowcast = is_nowcast;
-                            } else {
-                                st.grid = Some(TileGridPayload {
-                                    center: nyx_weather_core::lat_lon_to_tile(lat, lon, zoom),
-                                    basemap_tiles: vec![None; 9],
-                                    overlay_tiles: ov_tiles,
-                                    frame_time,
-                                    is_nowcast,
-                                });
-                            }
-                            drop(st);
-                            canvas_ov.queue_draw();
-                        }
-                    },
-                );
-            } else {
-                canvas.queue_draw();
-            }
-        })
-    };
-
-    // Wire layer switcher to also trigger tile fetch
+    // Drawing: the composed pictures, the frame fade and what goes over them.
     {
-        let req = request_tiles.clone();
+        let state = state.clone();
+        let snap_owned = snap.cloned();
+        let c = ctx.clone();
+        canvas.set_draw_func(move |_, cr, w, h| {
+            let st = state.borrow();
+            let reduce = prefs::get().reduce_motion;
+            // A field is placed by latitude and longitude, so the last one fetched is right
+            // until the next arrives.
+            let field = st.field.as_ref().map(|(_, f)| f);
+            let scene = MapScene {
+                layer: st.layer,
+                geom: Some(MapGeom::new(loc.latitude, loc.longitude, st.zoom, w as f64, h as f64, st.pinch_scale)),
+                basemap: st.basemap.as_ref(),
+                frames: if is_tile_layer(st.layer) { st.frames_at(reduce) } else { None },
+                field,
+                snap: snap_owned.as_ref(),
+                units,
+                opacity: st.opacity,
+                anim_phase: st.anim_phase,
+                notice: st.notice.as_deref(),
+                credit: c.credit(st.layer),
+            };
+            charts::draw_radar_map(cr, w as f64, h as f64, &scene);
+        });
+    }
+
+    // Theme changes recolour the basemap and the satellite clouds.
+    {
+        let c = ctx.clone();
+        theme::subscribe(&canvas, move || {
+            {
+                let mut st = c.state.borrow_mut();
+                st.scene = None;
+                st.basemap = None;
+            }
+            c.load_scene();
+        });
+    }
+
+    // The map is composed for the canvas: the first size it gets, then (a moment after
+    // a resize settles) any size it outgrows.
+    {
+        let c = ctx.clone();
+        canvas.connect_resize(move |_, _, _| {
+            if c.state.borrow().scene.is_none() {
+                c.load_scene();
+                return;
+            }
+            if let Some(old) = c.resize_timer.borrow_mut().take() {
+                old.remove();
+            }
+            let c2 = c.clone();
+            let id = glib::timeout_add_local_once(Duration::from_millis(200), move || {
+                c2.resize_timer.borrow_mut().take();
+                c2.load_scene();
+            });
+            *c.resize_timer.borrow_mut() = Some(id);
+        });
+    }
+
+    // Wire layer switcher to load the layer
+    {
         let mut child = layer_seg.first_child();
         while let Some(w) = child {
             if let Some(btn) = w.downcast_ref::<gtk::Button>() {
-                let req2 = req.clone();
-                btn.connect_clicked(move |_| req2());
+                let c = ctx.clone();
+                btn.connect_clicked(move |_| {
+                    let limit = c.max_zoom();
+                    let z = c.state.borrow().zoom;
+                    if z > limit {
+                        c.set_zoom(limit);
+                    } else {
+                        c.load_scene();
+                    }
+                    c.ensure_ticking();
+                });
             }
             child = w.next_sibling();
         }
@@ -466,36 +723,10 @@ pub fn build(
 
     // Wire zoom buttons
     {
-        let state = state.clone();
-        let zoom_lbl = zoom_lbl.clone();
-        let req = request_tiles.clone();
-        zoom_out.connect_clicked(move |_| {
-            let mut st = state.borrow_mut();
-            if st.zoom > 4 {
-                st.zoom -= 1;
-                st.pinch_scale = 1.0;
-                zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                drop(st);
-                req();
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let zoom_lbl = zoom_lbl.clone();
-        let req = request_tiles.clone();
-        let max_zoom = max_zoom.clone();
-        zoom_in.connect_clicked(move |_| {
-            let limit = max_zoom();
-            let mut st = state.borrow_mut();
-            if st.zoom < limit {
-                st.zoom += 1;
-                st.pinch_scale = 1.0;
-                zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                drop(st);
-                req();
-            }
-        });
+        let c = ctx.clone();
+        zoom_out.connect_clicked(move |_| c.zoom_by(-1));
+        let c = ctx.clone();
+        zoom_in.connect_clicked(move |_| c.zoom_by(1));
     }
 
     // Wire touchpad / touchscreen pinch-to-zoom (gtk::GestureZoom)
@@ -503,7 +734,6 @@ pub fn build(
         let zoom_gesture = gtk::GestureZoom::new();
         zoom_gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
         let pinch_base = Rc::new(Cell::new(1.0_f64));
-
         {
             let state = state.clone();
             let pinch_base = pinch_base.clone();
@@ -513,69 +743,37 @@ pub fn build(
             });
         }
         {
-            let state = state.clone();
+            let c = ctx.clone();
             let pinch_base = pinch_base.clone();
-            let zoom_lbl = zoom_lbl.clone();
-            let req = request_tiles.clone();
-            let canvas = canvas.clone();
-            let max_zoom = max_zoom.clone();
             zoom_gesture.connect_scale_changed(move |_, scale| {
-                let base = pinch_base.get().max(0.05);
-                let rel = scale / base;
-                let mut stepped = false;
-                let limit = max_zoom();
-                {
-                    let mut st = state.borrow_mut();
-                    if rel >= 1.38 && st.zoom < limit {
-                        st.zoom += 1;
-                        st.pinch_scale = 1.0;
-                        pinch_base.set(scale);
-                        zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                        stepped = true;
-                    } else if rel <= 0.72 && st.zoom > 4 {
-                        st.zoom -= 1;
-                        st.pinch_scale = 1.0;
-                        pinch_base.set(scale);
-                        zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                        stepped = true;
-                    } else {
-                        st.pinch_scale = rel.clamp(0.85, 1.85);
-                    }
-                }
-                if stepped {
-                    req();
+                let rel = scale / pinch_base.get().max(0.05);
+                let (zoom, limit) = (c.state.borrow().zoom, c.max_zoom());
+                if rel >= 1.38 && zoom < limit {
+                    pinch_base.set(scale);
+                    c.set_zoom(zoom + 1);
+                } else if rel <= 0.72 && zoom > 4 {
+                    pinch_base.set(scale);
+                    c.set_zoom(zoom - 1);
                 } else {
-                    canvas.queue_draw();
+                    c.state.borrow_mut().pinch_scale = rel.clamp(0.85, 1.85);
+                    c.canvas.queue_draw();
                 }
             });
         }
         {
-            let state = state.clone();
-            let zoom_lbl = zoom_lbl.clone();
-            let req = request_tiles.clone();
-            let canvas = canvas.clone();
-            let max_zoom = max_zoom.clone();
+            let c = ctx.clone();
             zoom_gesture.connect_end(move |_, _| {
-                let mut stepped = false;
-                let limit = max_zoom();
-                {
-                    let mut st = state.borrow_mut();
-                    if st.pinch_scale >= 1.18 && st.zoom < limit {
-                        st.zoom += 1;
-                        zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                        stepped = true;
-                    } else if st.pinch_scale <= 0.88 && st.zoom > 4 {
-                        st.zoom -= 1;
-                        zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                        stepped = true;
-                    }
-                    st.pinch_scale = 1.0;
+                let (pinch, zoom) = {
+                    let st = c.state.borrow();
+                    (st.pinch_scale, st.zoom)
+                };
+                if pinch >= 1.18 {
+                    c.set_zoom(zoom + 1);
+                } else if pinch <= 0.88 {
+                    c.set_zoom(zoom.saturating_sub(1));
                 }
-                if stepped {
-                    req();
-                } else {
-                    canvas.queue_draw();
-                }
+                c.state.borrow_mut().pinch_scale = 1.0;
+                c.canvas.queue_draw();
             });
         }
         canvas.add_controller(zoom_gesture);
@@ -587,11 +785,8 @@ pub fn build(
             gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::DISCRETE,
         );
         scroll_ctrl.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let state = state.clone();
-        let zoom_lbl = zoom_lbl.clone();
-        let req = request_tiles.clone();
+        let c = ctx.clone();
         let scroll_accum = Cell::new(0.0_f64);
-        let max_zoom = max_zoom.clone();
         scroll_ctrl.connect_scroll(move |ctrl, _dx, dy| {
             let mods = ctrl.current_event_state();
             if !mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
@@ -600,25 +795,10 @@ pub fn build(
             let acc = scroll_accum.get() + dy;
             if acc <= -0.75 {
                 scroll_accum.set(0.0);
-                let limit = max_zoom();
-                let mut st = state.borrow_mut();
-                if st.zoom < limit {
-                    st.zoom += 1;
-                    st.pinch_scale = 1.0;
-                    zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                    drop(st);
-                    req();
-                }
+                c.zoom_by(1);
             } else if acc >= 0.75 {
                 scroll_accum.set(0.0);
-                let mut st = state.borrow_mut();
-                if st.zoom > 4 {
-                    st.zoom -= 1;
-                    st.pinch_scale = 1.0;
-                    zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                    drop(st);
-                    req();
-                }
+                c.zoom_by(-1);
             } else {
                 scroll_accum.set(acc);
             }
@@ -628,132 +808,64 @@ pub fn build(
     }
     {
         let dbl_click = gtk::GestureClick::new();
-        let state = state.clone();
-        let zoom_lbl = zoom_lbl.clone();
-        let req = request_tiles.clone();
+        let c = ctx.clone();
         dbl_click.connect_pressed(move |_, n_press, _, _| {
             if n_press == 2 {
-                let limit = max_zoom();
-                let mut st = state.borrow_mut();
-                if st.zoom < limit {
-                    st.zoom += 1;
-                    st.pinch_scale = 1.0;
-                    zoom_lbl.set_text(&format!("Z{}", st.zoom));
-                    drop(st);
-                    req();
-                }
+                c.zoom_by(1);
             }
         });
         canvas.add_controller(dbl_click);
     }
 
-    // Wire frame slider
+    // The slider picks a frame; playback moves it smoothly.
     {
-        let state = state.clone();
-        let req = request_tiles.clone();
+        let c = ctx.clone();
         frame_slider.connect_value_changed(move |s| {
-            let new_idx = s.value().round().max(0.0) as usize;
-            let changed = {
-                let mut st = state.borrow_mut();
-                if st.frame_idx != new_idx {
-                    st.frame_idx = new_idx;
-                    true
-                } else {
-                    false
-                }
-            };
-            if changed {
-                req();
+            if c.syncing.get() {
+                return;
             }
+            {
+                let mut st = c.state.borrow_mut();
+                st.pos = s.value().round().max(0.0);
+                st.hold = 0.0;
+            }
+            c.update_timeline();
+            c.canvas.queue_draw();
         });
     }
 
     // Wire Play/Pause button
     {
-        let state = state.clone();
+        let c = ctx.clone();
         let play_btn2 = play_btn.clone();
-        let req = request_tiles.clone();
-        let canvas2 = canvas.clone();
         play_btn.connect_clicked(move |_| {
             let now_playing = {
-                let mut st = state.borrow_mut();
+                let mut st = c.state.borrow_mut();
                 st.playing = !st.playing;
-                // One loop at a time: a quick Pause, Play leaves no second timer behind.
-                if let Some(old) = st.play_timer.take() {
-                    old.remove();
+                // From the newest frame, start the loop over.
+                if st.playing && st.pos >= st.frames.len().saturating_sub(1) as f64 {
+                    st.pos = st.ready_start() as f64;
+                    st.hold = 0.0;
                 }
                 st.playing
             };
             set_play_icon(&play_btn2, now_playing);
             if now_playing {
-                let state_tick = state.clone();
-                let req_tick = req.clone();
-                let canvas_tick = canvas2.clone();
-                let id = glib::timeout_add_local(Duration::from_millis(650), move || {
-                    if canvas_tick.root().is_none() {
-                        return glib::ControlFlow::Break;
-                    }
-                    if !canvas_tick.is_mapped() {
-                        return glib::ControlFlow::Continue;
-                    }
-                    let tile_layer = {
-                        let mut st = state_tick.borrow_mut();
-                        st.anim_phase = (st.anim_phase + 0.14).fract();
-                        let tile_layer = is_tile_layer(st.layer);
-                        if tile_layer && let Some(m) = &st.manifest {
-                            let len = active_frames(m, st.layer).len();
-                            if len > 0 {
-                                st.frame_idx = (st.frame_idx + 1) % len;
-                            }
-                        }
-                        tile_layer
-                    };
-                    if tile_layer {
-                        req_tick();
-                    } else {
-                        canvas_tick.queue_draw();
-                    }
-                    glib::ControlFlow::Continue
-                });
-                state.borrow_mut().play_timer = Some(id);
+                c.ensure_ticking();
             }
         });
     }
 
-    // Smooth animation timer for WindStreamlines when visible
+    // RainViewer lists its frames; once that's in, a place outside the US loads them.
     {
-        let state_wind = state.clone();
-        let canvas_wind = canvas.clone();
-        glib::timeout_add_local(Duration::from_millis(90), move || {
-            if canvas_wind.root().is_none() {
-                return glib::ControlFlow::Break;
-            }
-            if !canvas_wind.is_mapped() {
-                return glib::ControlFlow::Continue;
-            }
-            let mut st = state_wind.borrow_mut();
-            if st.layer == RadarLayerKind::WindStreamlines && !prefs::get().reduce_motion {
-                st.anim_phase = (st.anim_phase + 0.035).fract();
-                drop(st);
-                canvas_wind.queue_draw();
-            }
-            glib::ControlFlow::Continue
-        });
-    }
-
-    // Load basemap + any cached tiles immediately, then layer live manifest frames on top
-    request_tiles();
-    {
-        let state_init = state.clone();
-        let req_init = request_tiles.clone();
+        let c = ctx.clone();
         cmd::background(backend::fetch_radar_manifest, move |res| {
             if let Ok(m) = res {
-                let mut st = state_init.borrow_mut();
-                let frames = active_frames(&m, st.layer);
-                st.frame_idx = frames.len().saturating_sub(1);
-                st.manifest = Some(m);
-                drop(st);
-                req_init();
+                c.state.borrow_mut().manifest = Some(m);
+                if !c.loc.is_us() && c.state.borrow().layer == RadarLayerKind::PrecipitationRadar {
+                    c.state.borrow_mut().scene = None;
+                    c.load_scene();
+                }
             }
         });
     }
@@ -764,7 +876,7 @@ pub fn build(
         let coords = format!("{:.4}°, {:.4}°", s.location.latitude, s.location.longitude);
         details.append(&widgets::row(
             "Target coordinates",
-            "Center of the 3×3 Web Mercator radar and satellite composite.",
+            "The centre of the map.",
             Some(widgets::label(&coords, "tnum").upcast_ref()),
         ));
         let wind_vec = format!(
@@ -801,11 +913,4 @@ const MAP_MIN_HEIGHT: i32 = 200;
 fn set_play_icon(b: &gtk::Button, playing: bool) {
     b.set_icon_name(if playing { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" });
     b.set_tooltip_text(Some(if playing { "Pause the radar loop" } else { "Play the radar loop" }));
-}
-
-fn active_frames(m: &RadarManifest, layer: RadarLayerKind) -> &[RadarFrame] {
-    match layer {
-        RadarLayerKind::InfraredSatellite => &m.satellite_frames,
-        _ => &m.radar_frames,
-    }
 }
