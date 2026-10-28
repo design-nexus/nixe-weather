@@ -429,13 +429,20 @@ const SEARCH_WIDE: i32 = 30;
 const SEARCH_NARROW: i32 = 10;
 
 /// Narrow windows (floating, or a half-screen tile) get a shorter search and no
-/// update time in the header, so it fits at 460 px.
+/// location or update time in the header, so it fits at 460 px.
 fn set_narrow(narrow: bool) {
-    NARROW.with(|n| n.set(narrow));
+    let changed = NARROW.with(|n| n.replace(narrow)) != narrow;
     let Some(u) = ui() else { return };
-    let b = u.borrow();
-    b.search.set_width_chars(if narrow { SEARCH_NARROW } else { SEARCH_WIDE });
-    b.status_readout.set_visible(!narrow);
+    {
+        let b = u.borrow();
+        b.search.set_width_chars(if narrow { SEARCH_NARROW } else { SEARCH_WIDE });
+        b.status_readout.set_visible(!narrow);
+        b.header.subtitle.set_visible(!narrow && !b.header.subtitle.text().is_empty());
+    }
+    // Pages size some parts for the window when they're built (the 7-day bars).
+    if changed {
+        rerender_current();
+    }
 }
 
 fn apply_compact(nav: &gtk::Box, compact: bool) {
@@ -973,7 +980,7 @@ pub fn rerender_current() {
     // The header: the location after the app's name, and when the forecast is from.
     if let Some(loc) = prefs::get().active_location() {
         subtitle.set_text(&loc.name);
-        subtitle.set_visible(true);
+        subtitle.set_visible(!is_narrow());
         subtitle.set_tooltip_text(Some(&loc.display_name()));
     }
     if let Some(s) = &snap {
@@ -1043,6 +1050,8 @@ fn attribution(a: &nyx_weather_core::ProviderAttribution) -> gtk::Label {
     label.set_markup(&format!("{markup} · {}", glib::markup_escape_text(&a.license_name)));
     label.add_css_class("attribution");
     label.set_halign(gtk::Align::Start);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
     label
 }
 

@@ -297,7 +297,8 @@ pub fn build(
         min_lbl.set_xalign(1.0);
         d_row.append(&min_lbl);
 
-        let bar_track = super::range_bar(d.temp_min_c, d.temp_max_c, week_min, week_span, 110);
+        let bar_w = if window::is_narrow() { 70 } else { 110 };
+        let bar_track = super::range_bar(d.temp_min_c, d.temp_max_c, week_min, week_span, bar_w);
         d_row.append(&bar_track);
 
         let max_lbl = widgets::label(&units.temperature.format(d.temp_max_c), "daily-max");
@@ -510,9 +511,13 @@ fn expandable_detail_row(
 
     let title_lbl = widgets::label(title, "detail-title");
     title_lbl.set_hexpand(true);
+    title_lbl.set_xalign(0.0);
+    title_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
     header.append(&title_lbl);
 
     let sum_lbl = widgets::label(summary_right, "detail-summary");
+    sum_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    sum_lbl.set_tooltip_text(Some(summary_right));
     header.append(&sum_lbl);
 
     let chevron = gtk::Image::from_icon_name("pan-down-symbolic");
@@ -530,6 +535,9 @@ fn expandable_detail_row(
         let kl = widgets::label(k, "dim");
         kl.set_hexpand(true);
         let vl = widgets::label(v, "tnum");
+        vl.set_wrap(true);
+        vl.set_xalign(1.0);
+        vl.set_justify(gtk::Justification::Right);
         r.append(&kl);
         r.append(&vl);
         body.append(&r);

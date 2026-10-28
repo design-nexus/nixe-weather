@@ -86,8 +86,15 @@ pub fn build(
         move || if state.borrow().layer == RadarLayerKind::PrecipitationRadar && !us { RAINVIEWER_MAX_ZOOM } else { 10 }
     };
 
+    // The page doesn't scroll: the map takes the height the window has left after
+    // its controls, so the map, the toolbar and the timeline are always in view.
+    page.root.set_vscrollbar_policy(gtk::PolicyType::Never);
+    page.body.set_vexpand(true);
+
     // 1. Layer & Map Controls Card
     let g_map = page.group("Weather radar & spatial overlays");
+    g_map.wrapper.set_vexpand(true);
+    g_map.list.set_vexpand(true);
     let desc_lbl = widgets::label(state.borrow().layer.description(), "group-note");
     desc_lbl.set_wrap(true);
     g_map
@@ -132,30 +139,40 @@ pub fn build(
     spacer.set_hexpand(true);
     toolbar.append(&spacer);
 
-    // Zoom controls
+    // Zoom controls, on the map's top-right corner so the toolbar fits a 460 px window.
     let zoom_out = widgets::icon_button("zoom-out-symbolic", "Zoom out (Ctrl+scroll, or pinch)");
     let zoom_lbl = widgets::label(&format!("Z{}", state.borrow().zoom), "tnum");
     let zoom_in = widgets::icon_button("zoom-in-symbolic", "Zoom in (Ctrl+scroll, double-click, or pinch)");
-    toolbar.append(&zoom_out);
-    toolbar.append(&zoom_lbl);
-    toolbar.append(&zoom_in);
+    let map_zoom = widgets::vbox(0);
+    map_zoom.add_css_class("map-zoom");
+    map_zoom.set_halign(gtk::Align::End);
+    map_zoom.set_valign(gtk::Align::Start);
+    map_zoom.append(&zoom_in);
+    map_zoom.append(&zoom_lbl);
+    map_zoom.append(&zoom_out);
+
+    // Overlay opacity and the details about the place, behind one button so the
+    // map keeps the room.
+    let details = widgets::vbox(4);
+    details.add_css_class("radar-details");
+    let details_btn = gtk::MenuButton::new();
+    details_btn.set_icon_name("view-more-symbolic");
+    details_btn.set_tooltip_text(Some("Overlay opacity and map details"));
+    details_btn.add_css_class("flat");
+    details_btn.set_valign(gtk::Align::Center);
+    let details_pop = gtk::Popover::new();
+    details_pop.set_child(Some(&details));
+    details_btn.set_popover(Some(&details_pop));
+    toolbar.append(&details_btn);
     g_map.add(&toolbar);
 
-    // 2. Interactive Radar & Overlay Canvas (fills width, maintains 16:11 aspect ratio)
+    // 2. Interactive Radar & Overlay Canvas: fills the card's width and the height
+    // left over; the tiles scale to cover any shape.
     let canvas = gtk::DrawingArea::new();
-    canvas.set_content_height(520);
+    canvas.set_content_height(MAP_MIN_HEIGHT);
     canvas.set_hexpand(true);
+    canvas.set_vexpand(true);
     canvas.add_css_class("radar-canvas");
-
-    canvas.connect_resize(|area, w, _h| {
-        if w > 120 {
-            let target_h = ((w as f64) * 0.68).round().clamp(280.0, 980.0) as i32;
-            if (area.content_height() - target_h).abs() > 4 {
-                let a = area.clone();
-                glib::idle_add_local_once(move || a.set_content_height(target_h));
-            }
-        }
-    });
 
     let c_weak = canvas.downgrade();
     theme::subscribe(&canvas, move || {
@@ -187,7 +204,10 @@ pub fn build(
             );
         });
     }
-    g_map.add(&canvas);
+    let map = gtk::Overlay::new();
+    map.set_child(Some(&canvas));
+    map.add_overlay(&map_zoom);
+    g_map.add(&map);
 
     // 3. Timeline Scrubber & Opacity Bar
     let timeline_row = widgets::hbox(10);
@@ -227,7 +247,7 @@ pub fn build(
             }
         },
     );
-    g_map.add(&opacity_row);
+    details.append(&opacity_row);
 
     // Helper closure to fetch the 3×3 tile grid for the current state
     let request_tiles: Rc<dyn Fn()> = {
@@ -738,13 +758,13 @@ pub fn build(
         });
     }
 
-    // 4. Regional Telemetry Summary Card
+    // 4. Regional telemetry, in the details popover
     if let Some(s) = snap {
-        let g_meta = page.group("Regional telemetry & radar coverage");
+        details.append(&widgets::label("REGIONAL TELEMETRY", "group-title"));
         let coords = format!("{:.4}°, {:.4}°", s.location.latitude, s.location.longitude);
-        g_meta.add(&widgets::row(
+        details.append(&widgets::row(
             "Target coordinates",
-            "Center of the 3×3 Web Mercator radar & satellite composite.",
+            "Center of the 3×3 Web Mercator radar and satellite composite.",
             Some(widgets::label(&coords, "tnum").upcast_ref()),
         ));
         let wind_vec = format!(
@@ -757,7 +777,7 @@ pub fn build(
                 .map(|g| format!(" · gusts {}", units.wind_speed.format(g)))
                 .unwrap_or_default()
         );
-        g_meta.add(&widgets::row(
+        details.append(&widgets::row(
             "Surface wind vector",
             "At the location itself; the Wind layer shows it across the map.",
             Some(widgets::label(&wind_vec, "tnum").upcast_ref()),
@@ -767,13 +787,16 @@ pub fn build(
             units.precipitation.format(s.current.precipitation_mm),
             s.current.cloud_cover_pct
         );
-        g_meta.add(&widgets::row(
+        details.append(&widgets::row(
             "Surface precipitation & cloud deck",
             "Current liquid-equivalent precipitation rate and total cloud fraction.",
             Some(widgets::label(&precip_now, "tnum").upcast_ref()),
         ));
     }
 }
+
+/// The map's smallest height; past this the window, not the map, stops shrinking.
+const MAP_MIN_HEIGHT: i32 = 200;
 
 fn set_play_icon(b: &gtk::Button, playing: bool) {
     b.set_icon_name(if playing { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" });
