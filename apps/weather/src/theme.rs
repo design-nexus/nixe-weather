@@ -204,6 +204,7 @@ pub fn condition_color_class(cond: WeatherCondition, is_day: bool) -> &'static s
 
 /// Install the stylesheet and the current palette, and follow Omarchy live.
 pub fn install() {
+    nyx_theme::use_design_2();
     nyx_theme::install(Style {
         window_class: "weather-window",
         base_skip: &[],

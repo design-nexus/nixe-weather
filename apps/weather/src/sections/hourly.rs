@@ -210,7 +210,7 @@ pub fn build(
                 units.temperature.format(h.temperature_c),
                 units.temperature.format(h.apparent_temperature_c)
             ),
-            "mono",
+            "tnum",
         );
         temp.set_width_chars(10);
         row.append(&temp);

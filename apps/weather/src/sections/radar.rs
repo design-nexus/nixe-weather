@@ -134,7 +134,7 @@ pub fn build(
 
     // Zoom controls
     let zoom_out = widgets::icon_button("zoom-out-symbolic", "Zoom out (Ctrl+scroll, or pinch)");
-    let zoom_lbl = widgets::label(&format!("Z{}", state.borrow().zoom), "mono");
+    let zoom_lbl = widgets::label(&format!("Z{}", state.borrow().zoom), "tnum");
     let zoom_in = widgets::icon_button("zoom-in-symbolic", "Zoom in (Ctrl+scroll, double-click, or pinch)");
     toolbar.append(&zoom_out);
     toolbar.append(&zoom_lbl);
@@ -201,7 +201,7 @@ pub fn build(
     frame_slider.set_hexpand(true);
     timeline_row.append(&frame_slider);
 
-    let frame_time_lbl = widgets::label("Live", "mono");
+    let frame_time_lbl = widgets::label("Live", "tnum");
     frame_time_lbl.set_width_chars(18);
     frame_time_lbl.set_xalign(1.0);
     timeline_row.append(&frame_time_lbl);
@@ -745,7 +745,7 @@ pub fn build(
         g_meta.add(&widgets::row(
             "Target coordinates",
             "Center of the 3×3 Web Mercator radar & satellite composite.",
-            Some(widgets::label(&coords, "mono").upcast_ref()),
+            Some(widgets::label(&coords, "tnum").upcast_ref()),
         ));
         let wind_vec = format!(
             "{} {} ({}°){}",
@@ -760,7 +760,7 @@ pub fn build(
         g_meta.add(&widgets::row(
             "Surface wind vector",
             "At the location itself; the Wind layer shows it across the map.",
-            Some(widgets::label(&wind_vec, "mono").upcast_ref()),
+            Some(widgets::label(&wind_vec, "tnum").upcast_ref()),
         ));
         let precip_now = format!(
             "{} · {}% cloud cover",
@@ -770,7 +770,7 @@ pub fn build(
         g_meta.add(&widgets::row(
             "Surface precipitation & cloud deck",
             "Current liquid-equivalent precipitation rate and total cloud fraction.",
-            Some(widgets::label(&precip_now, "mono").upcast_ref()),
+            Some(widgets::label(&precip_now, "tnum").upcast_ref()),
         ));
     }
 }

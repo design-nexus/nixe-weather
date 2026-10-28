@@ -1,6 +1,7 @@
-/* Weather stylesheet — loaded after nyx-theme's base.css.
+/* Weather stylesheet (Nyx 2.0) — loaded after nyx-theme's base.css and base2.css.
  * Uses semantic @theme_* tokens and @weather_* palette colors so every
- * color adapts live when the Omarchy or Nyx theme changes. */
+ * color adapts live when the Omarchy or Nyx theme changes. One surface: cards
+ * and spacing separate things, not lines. */
 
 /* ---------- Semantic condition & metric icon colors ---------- */
 
@@ -37,31 +38,31 @@
 .tag.good {
   background: alpha(@weather_wind, 0.16);
   color: @weather_wind;
-  border: 1px solid alpha(@weather_wind, 0.34);
+  border: none;
 }
 
 .tag.moderate {
   background: alpha(@weather_sun, 0.16);
   color: @weather_sun;
-  border: 1px solid alpha(@weather_sun, 0.34);
+  border: none;
 }
 
 .tag.elevated {
   background: alpha(@weather_warm, 0.16);
   color: @weather_warm;
-  border: 1px solid alpha(@weather_warm, 0.34);
+  border: none;
 }
 
 .tag.uv {
   background: alpha(@weather_uv, 0.16);
   color: @weather_uv;
-  border: 1px solid alpha(@weather_uv, 0.34);
+  border: none;
 }
 
 .tag.rain {
   background: alpha(@weather_rain, 0.16);
   color: @weather_rain;
-  border: 1px solid alpha(@weather_rain, 0.34);
+  border: none;
 }
 
 /* ---------- Severe weather alert banner ---------- */
@@ -72,9 +73,8 @@
 }
 
 .alert-title {
-  font-weight: 700;
+  font-weight: 600;
   color: @theme_danger;
-  letter-spacing: 0.5px;
 }
 
 .alert-headline {
@@ -90,15 +90,16 @@
 /* ---------- Current conditions hero ---------- */
 
 .hero-card {
-  border: 1px solid @hairline;
-  border-radius: 10px;
+  background: @theme_card;
+  border: none;
+  border-radius: var(--nyx-radius-card);
   padding: 18px 20px;
   margin-bottom: 6px;
 }
 
 .hero-location {
   font-size: 1.25em;
-  font-weight: 700;
+  font-weight: 600;
   color: @theme_text;
 }
 
@@ -109,15 +110,15 @@
 
 .hero-temp {
   font-size: 2.2em;
-  font-weight: 700;
+  font-weight: 600;
   color: @theme_text;
   font-feature-settings: "tnum";
 }
 
 .hero-condition {
   font-size: 1.06em;
-  font-weight: 600;
-  color: @theme_accent;
+  font-weight: 500;
+  color: @theme_text;
 }
 
 .hero-nowcast {
@@ -146,8 +147,7 @@
 }
 
 .hero-quick-strip {
-  padding-top: 10px;
-  border-top: 1px solid alpha(@theme_accent, 0.18);
+  padding-top: 6px;
 }
 
 .hero-stat {
@@ -181,13 +181,12 @@
 .hourly-cell {
   min-width: 64px;
   padding: 12px 10px;
-  border-left: 1px solid @divider;
+  border-radius: var(--nyx-radius-small);
 }
 
+/* Now: the selection pill, no underline. */
 .hourly-cell.now {
-  border-left: none;
-  background: alpha(@theme_accent, 0.10);
-  border-bottom: 2px solid @theme_accent;
+  background: @nav_active;
 }
 
 .hourly-time {
@@ -198,7 +197,7 @@
 
 .hourly-cell.now .hourly-time {
   color: @theme_accent;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .hourly-pop {
@@ -221,11 +220,6 @@
 .daily-row {
   padding: 10px 16px;
   min-height: 44px;
-  border-top: 1px solid @divider;
-}
-
-.daily-row:first-child {
-  border-top: none;
 }
 
 .daily-day {
@@ -249,13 +243,13 @@
 
 .daily-max {
   font-size: 0.92em;
-  font-weight: 700;
+  font-weight: 600;
   color: @weather_warm;
   font-feature-settings: "tnum";
 }
 
 .temp-range-track {
-  background: alpha(@theme_muted, 0.32);
+  background: @track;
   border-radius: 4px;
   min-height: 6px;
 }
@@ -268,19 +262,12 @@
 
 /* ---------- Expandable details ---------- */
 
-.detail-expand-row {
-  border-top: 1px solid @divider;
-}
-
-.detail-expand-row:first-child {
-  border-top: none;
-}
-
 button.detail-expand-header {
   min-height: 48px;
   padding: 10px 18px;
-  border-radius: 0;
+  border-radius: var(--nyx-radius-small);
   font-weight: normal;
+  background: transparent;
 }
 
 .detail-expand-header:hover {
@@ -294,13 +281,12 @@ button.detail-expand-header {
 
 .detail-summary {
   font-feature-settings: "tnum";
-  font-weight: 600;
-  color: @theme_accent;
+  font-weight: 500;
+  color: @theme_text;
 }
 
 .detail-expand-body {
-  padding: 10px 18px 14px 44px;
-  border-top: 1px solid @divider;
+  padding: 4px 18px 14px 44px;
   font-size: 0.88em;
 }
 
@@ -313,7 +299,6 @@ button.detail-expand-header {
 
 .radar-toolbar {
   padding: 10px 16px;
-  border-bottom: 1px solid @divider;
 }
 
 .radar-canvas {
@@ -322,7 +307,6 @@ button.detail-expand-header {
 
 .radar-timeline-row {
   padding: 10px 16px 12px;
-  border-top: 1px solid @divider;
 }
 
 /* ---------- Moon & Astronomy ---------- */
@@ -331,17 +315,19 @@ button.detail-expand-header {
   padding: 14px 18px;
 }
 
-/* ---------- Location search strip & results ---------- */
+/* ---------- Location search (in the header) and its results ---------- */
 
+/* The results drop in under the header as a card. */
 .search-results-panel {
-  padding: 8px 16px 10px;
-  border-bottom: 1px solid @hairline;
-  background: @theme_bg;
+  margin: 4px 16px 8px;
+  padding: 6px;
+  border-radius: var(--nyx-radius-card);
+  background: @theme_card;
 }
 
 .search-result-row {
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--nyx-radius-small);
 }
 
 .search-result-row:hover {
@@ -351,9 +337,46 @@ button.detail-expand-header {
 /* ---------- Saved locations in sidebar ---------- */
 
 .nav-loc-badge {
-  font-size: 0.82em;
-  font-weight: 600;
-  color: @theme_accent;
+  font-size: 0.885em;
+  color: @theme_text_tertiary;
+  font-feature-settings: "tnum";
+}
+
+/* The location in use: a quiet pill, so the section keeps the accent selection. */
+.settings-navigation button.nav-item.current {
+  background: alpha(@theme_text, 0.05);
+  color: @theme_text;
+}
+
+/* ---------- Header and page foot ---------- */
+
+.header-status {
+  font-size: 11.5px;
+  color: @theme_dim_text;
+  font-feature-settings: "tnum";
+}
+
+window.weather-window .app-header button.bar-button,
+window.weather-window .app-header menubutton.bar-button > button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: var(--nyx-radius-small);
+  box-shadow: none;
+}
+
+/* The data's credit, quiet at the end of each page. */
+.attribution {
+  margin-top: 18px;
+  font-size: 11.5px;
+  color: @theme_text_tertiary;
+}
+
+.attribution link {
+  color: @theme_dim_text;
+}
+
+.tnum {
   font-feature-settings: "tnum";
 }
 

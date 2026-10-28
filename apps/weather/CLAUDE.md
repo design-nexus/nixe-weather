@@ -2,6 +2,15 @@
 
 - GTK4 (gtk4-rs 0.11) + Rust, no libadwaita, built to `STYLE.md`. The weather logic is
   `crates/nyx-weather-core`; the app is the GTK shell.
+- Nyx Design 2.0 (`nyx_theme::use_design_2()`): one blended surface, no lines between
+  areas. The unified header (`chrome::app_header`) shows the app, the active location as
+  its subtitle and the sidebar toggle; the location search is always in its middle (the
+  results drop in as a card under it); at the end, when the forecast was updated (full
+  readout in its tooltip), Refresh, Floating and Settings. Narrow windows (floating,
+  under 980 px) shorten the search and drop the update time. No status bar: the data's
+  credit (`attribution`, linked) ends every forecast page. The sidebar's selection
+  (`.active`) is the section; the location in use is a quiet `.current` pill. Chart and
+  map labels use the theme's UI font. Settings has the shared Accent row (no Glow).
 - Core (`crates/nyx-weather-core`):
   - `model.rs`: the snapshot types and units (temperature, wind, precipitation, pressure,
     distance). `ForecastSnapshot::advance_to(now)` drops past hours and days, expired
@@ -33,3 +42,9 @@
   installer always `require`s that file when Weather is installed.
 - `plugin/`: the omarchy-shell bar widget (polls `nyx-weather --waybar`).
 - Checks: `cargo test -p nyx-weather-core -p nyx-weather`, clippy `-D warnings` on both.
+  Layout check: `WEATHER_SNAPSHOT=/tmp/x.png nyx-weather --section ID` renders the window
+  offscreen and quits (`WEATHER_SNAPSHOT_W`/`_H` for the size, `WEATHER_SNAPSHOT_DELAY`
+  ms for the forecast to load). Use a different `WEATHER_APP_ID` and scratch
+  `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME`, with `float_window` equal to the
+  real setting: the Hyprland rule in `~/.config/hypr/nyx.lua` follows `HOME`, not XDG,
+  and changing it reloads Hyprland.

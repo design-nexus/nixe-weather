@@ -529,7 +529,7 @@ fn expandable_detail_row(
         let r = widgets::hbox(8);
         let kl = widgets::label(k, "dim");
         kl.set_hexpand(true);
-        let vl = widgets::label(v, "mono");
+        let vl = widgets::label(v, "tnum");
         r.append(&kl);
         r.append(&vl);
         body.append(&r);

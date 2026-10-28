@@ -92,7 +92,7 @@ pub fn slider_row(
     scale.set_width_request(160);
     scale.set_value(initial);
     let suffix_str = suffix.to_string();
-    let val_lbl = label(&format!("{initial:.prec$}{suffix_str}", prec = digits.max(0) as usize), "mono");
+    let val_lbl = label(&format!("{initial:.prec$}{suffix_str}", prec = digits.max(0) as usize), "tnum");
     val_lbl.set_width_chars(6);
     val_lbl.set_xalign(1.0);
     let vl = val_lbl.clone();

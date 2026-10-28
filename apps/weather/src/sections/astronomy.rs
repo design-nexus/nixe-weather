@@ -38,7 +38,7 @@ pub fn build(
     g_sun.add(&widgets::row(
         "Sunrise & sunset",
         &format!("Local timezone: {}", snap.location.timezone),
-        Some(widgets::label(&format!("↑ {sr}   ·   ↓ {ss}"), "mono").upcast_ref()),
+        Some(widgets::label(&format!("↑ {sr}   ·   ↓ {ss}"), "tnum").upcast_ref()),
     ));
     g_sun.add(&widgets::row(
         "Daylight & sunshine duration",
@@ -50,7 +50,7 @@ pub fn build(
                     format_duration_secs(today.and_then(|d| d.daylight_duration_secs)),
                     format_duration_secs(today.and_then(|d| d.sunshine_duration_secs))
                 ),
-                "mono",
+                "tnum",
             )
             .upcast_ref(),
         ),
@@ -68,7 +68,7 @@ pub fn build(
             "Daily daylight change",
             "Difference in daylight length tomorrow compared to today.",
             Some(
-                widgets::label(&format!("{sign}{:.1} min / day", diff_mins.abs()), "mono")
+                widgets::label(&format!("{sign}{:.1} min / day", diff_mins.abs()), "tnum")
                     .upcast_ref(),
             ),
         ));
@@ -100,7 +100,7 @@ pub fn build(
             "Next Full Moon in {:.1} days  ·  Next New Moon in {:.1} days",
             moon.days_to_full, moon.days_to_new
         ),
-        "mono",
+        "tnum",
     ));
     moon_card.append(&moon_meta);
     g_moon.add(&moon_card);
@@ -160,7 +160,7 @@ pub fn build(
             g_models.add(&widgets::row(
                 &m.model_name,
                 &format!("Spatial resolution: {}", m.resolution),
-                Some(widgets::label(&summary, "mono").upcast_ref()),
+                Some(widgets::label(&summary, "tnum").upcast_ref()),
             ));
         }
     }

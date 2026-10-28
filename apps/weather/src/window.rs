@@ -1,6 +1,7 @@
-//! The main Weather window: collapsible sidebar (with Forecast, Maps & Radar,
-//! Environment, and Saved Locations), crossfading section stack, location search
-//! strip, and bottom status bar.
+//! The main Weather window: the header (the app and the active location, the
+//! sidebar toggle; the location search in the middle; when the forecast was
+//! updated, refresh, floating and settings), the collapsible sidebar (Forecast,
+//! Maps & Radar, Environment, and Saved Locations) and a crossfading section stack.
 
 use crate::sections::{self, Section};
 use crate::widgets;
@@ -37,6 +38,8 @@ struct Ui {
     search: gtk::SearchEntry,
     search_results_panel: gtk::Box,
     search_results_list: gtk::Box,
+    header: chrome::AppHeader,
+    /// When the forecast was updated (or that it's refreshing), at the header's end.
     status_readout: gtk::Label,
     overlay: gtk::Overlay,
     sections: Vec<Section>,
@@ -112,6 +115,12 @@ pub fn present(app: &gtk::Application, section: Option<&str>, location_arg: Opti
     }
     restart_refresh_timer();
 
+    // Developer aid: WEATHER_SNAPSHOT=/path.png renders the window to a PNG
+    // (invisibly) and quits, so layouts can be checked without a visible window.
+    if let Some(out) = std::env::var_os("WEATHER_SNAPSHOT") {
+        snapshot_and_quit(app, std::path::PathBuf::from(out));
+        return;
+    }
     if let Some(u) = ui() {
         u.borrow().window.present();
     }
@@ -158,7 +167,7 @@ fn build(app: &gtk::Application) {
     let (def_w, def_h) = if p.float_window {
         (460, 720)
     } else {
-        (1120, 800)
+        (1280, 800)
     };
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -236,9 +245,6 @@ fn build(app: &gtk::Application) {
         .child(&list)
         .build();
 
-    let head = chrome::sidebar_head("Weather", Some("Search or add location (Ctrl+F)"));
-    head.toggle.connect_clicked(|_| toggle_sidebar());
-    nav.append(&head.root);
     nav.append(&nav_scroll);
 
     // ----- Content column -----
@@ -252,8 +258,10 @@ fn build(app: &gtk::Application) {
     stack.set_transition_duration(if p.reduce_motion { 0 } else { 160 });
 
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Search city, state, or postal code…"));
-    search.set_visible(false);
+    search.set_placeholder_text(Some("Search city, state, or postal code  (Ctrl+F)"));
+    search.add_css_class("bar-search");
+    search.set_width_chars(SEARCH_WIDE);
+    search.update_property(&[gtk::accessible::Property::Label("Search or add a location")]);
 
     let search_results_panel = widgets::vbox(6);
     search_results_panel.add_css_class("search-results-panel");
@@ -273,29 +281,13 @@ fn build(app: &gtk::Application) {
         let panel = search_results_panel.clone();
         search.connect_stop_search(move |e| {
             e.set_text("");
-            e.set_visible(false);
             panel.set_visible(false);
-        });
-    }
-
-    if let Some(find) = &head.search {
-        let s = search.clone();
-        let panel = search_results_panel.clone();
-        find.connect_clicked(move |_| {
-            if s.is_visible() && s.text().is_empty() {
-                s.set_visible(false);
-                panel.set_visible(false);
-            } else {
-                s.set_visible(true);
-                s.grab_focus();
-            }
         });
     }
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("settings-content");
     content.set_hexpand(true);
-    content.append(&chrome::search_strip(&search));
     content.append(&search_results_panel);
     content.append(&stack);
 
@@ -304,35 +296,31 @@ fn build(app: &gtk::Application) {
     body.append(&nav);
     body.append(&content);
 
-    // ----- Status bar -----
-    let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 14);
-    status_bar.add_css_class("status-bar");
-    status_bar.append(&chrome::shortcuts_button(show_shortcuts));
-
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    status_bar.append(&spacer);
-
-    let status_readout = widgets::label("Loading…", "status-readout");
-    status_readout.set_ellipsize(gtk::pango::EllipsizeMode::Start);
-    status_bar.append(&status_readout);
-
-    status_bar.append(&chrome::status_action(
-        "view-refresh-symbolic",
-        "Refresh forecast (Ctrl+R)",
-        || refresh_active(true),
-    ));
-    status_bar.append(&chrome::status_action(
-        "view-restore-symbolic",
-        "Toggle floating window (Ctrl+M)",
-        toggle_floating_window,
-    ));
-    status_bar.append(&chrome::gear(settings_dialog::open));
+    // ----- Header -----
+    // The app and the active location, the sidebar toggle; the location search in
+    // the middle; when the forecast was updated, refresh, floating and Settings.
+    let header = chrome::app_header(&window, "weather-few-clouds-symbolic", "Weather");
+    let collapse = widgets::bar_button("sidebar-show-symbolic", "Collapse the sidebar (Ctrl+B)");
+    collapse.connect_clicked(|_| toggle_sidebar());
+    header.start.append(&collapse);
+    header.center.append(&search);
+    header.end.set_spacing(4);
+    let status_readout = widgets::label("Loading…", "header-status");
+    status_readout.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    status_readout.set_margin_end(4);
+    header.end.append(&status_readout);
+    let refresh = widgets::bar_button("view-refresh-symbolic", "Refresh the forecast (Ctrl+R)");
+    refresh.connect_clicked(|_| refresh_active(true));
+    header.end.append(&refresh);
+    let float = widgets::bar_button("view-restore-symbolic", "Floating or tiled window (Ctrl+M)");
+    float.connect_clicked(|_| toggle_floating_window());
+    header.end.append(&float);
+    header.end.append(&chrome::settings_button(settings_dialog::open));
 
     let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
     frame.add_css_class("window-frame");
+    frame.append(&header.root);
     frame.append(&body);
-    frame.append(&status_bar);
 
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&frame));
@@ -355,7 +343,7 @@ fn build(app: &gtk::Application) {
                 return;
             }
             nav.add_css_class("sized");
-            NARROW.with(|n| n.set(narrow));
+            set_narrow(narrow);
             apply_compact(&nav, narrow || prefs::get().sidebar_collapsed);
         }
     };
@@ -397,6 +385,7 @@ fn build(app: &gtk::Application) {
         search,
         search_results_panel,
         search_results_list,
+        header,
         status_readout,
         overlay,
         sections,
@@ -435,10 +424,21 @@ fn catch_up() {
     }
 }
 
+/// The location search's width in characters, in a full window and a narrow one.
+const SEARCH_WIDE: i32 = 30;
+const SEARCH_NARROW: i32 = 10;
+
+/// Narrow windows (floating, or a half-screen tile) get a shorter search and no
+/// update time in the header, so it fits at 460 px.
+fn set_narrow(narrow: bool) {
+    NARROW.with(|n| n.set(narrow));
+    let Some(u) = ui() else { return };
+    let b = u.borrow();
+    b.search.set_width_chars(if narrow { SEARCH_NARROW } else { SEARCH_WIDE });
+    b.status_readout.set_visible(!narrow);
+}
+
 fn apply_compact(nav: &gtk::Box, compact: bool) {
-    if let Some(head) = nav.first_child().and_downcast::<gtk::Box>() {
-        chrome::set_head_compact(&head, compact);
-    }
     if compact {
         nav.add_css_class("compact");
     } else {
@@ -501,13 +501,13 @@ pub fn apply_floating_size(float: bool) {
         if settings_dialog::is_open() {
             nyx_ui::settings_card::close();
         }
-        NARROW.with(|n| n.set(true));
+        set_narrow(true);
         apply_compact(&nav, true);
         w.set_default_size(460, 720);
     } else {
-        NARROW.with(|n| n.set(false));
+        set_narrow(false);
         apply_compact(&nav, prefs::get().sidebar_collapsed);
-        w.set_default_size(1120, 800);
+        w.set_default_size(1280, 800);
         settings_dialog::fit(&w);
     }
     glib::timeout_add_local_once(Duration::from_millis(45), move || {
@@ -538,9 +538,9 @@ pub fn navigate(section: &str) {
         b.current_section = target_id.clone();
         for (id, btn) in &b.nav_items {
             if id == &target_id {
-                btn.add_css_class("selected");
+                btn.add_css_class("active");
             } else {
-                btn.remove_css_class("selected");
+                btn.remove_css_class("active");
             }
         }
         chrome::set_title(&b.window, "Weather", &title);
@@ -567,8 +567,9 @@ pub fn rebuild_sidebar_locations() {
     for (idx, loc) in p.saved_locations.iter().enumerate() {
         let button = gtk::Button::new();
         button.add_css_class("nav-item");
+        // The section is the sidebar's selection; the location in use is marked quietly.
         if loc.id == active_id {
-            button.add_css_class("selected");
+            button.add_css_class("current");
         }
         let cached = backend::get_cached(&loc.id);
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -687,7 +688,6 @@ pub fn move_location(id: &str, by: i32) {
 pub fn show_search() {
     let Some(u) = ui() else { return };
     let search = u.borrow().search.clone();
-    search.set_visible(true);
     search.grab_focus();
 }
 
@@ -779,7 +779,6 @@ fn open_search_result(loc: Location) {
     if let Some(u) = ui() {
         let b = u.borrow();
         b.search.set_text("");
-        b.search.set_visible(false);
         b.search_results_panel.set_visible(false);
     }
 }
@@ -945,7 +944,7 @@ pub fn refresh_active(force: bool) {
 
 pub fn rerender_current() {
     let Some(u) = ui() else { return };
-    let (stack, sec_id, snap, stale, err_str, readout_lbl, build_fn) = {
+    let (stack, sec_id, snap, stale, err_str, readout_lbl, subtitle, build_fn) = {
         let b = u.borrow();
         let sec_id = if b.current_section.is_empty() {
             "overview".to_string()
@@ -965,12 +964,18 @@ pub fn rerender_current() {
             b.stale_fallback,
             b.last_error.clone(),
             b.status_readout.clone(),
+            b.header.subtitle.clone(),
             build_fn,
         )
     };
     let Some(build_fn) = build_fn else { return };
 
-    // Update status bar readout
+    // The header: the location after the app's name, and when the forecast is from.
+    if let Some(loc) = prefs::get().active_location() {
+        subtitle.set_text(&loc.name);
+        subtitle.set_visible(true);
+        subtitle.set_tooltip_text(Some(&loc.display_name()));
+    }
     if let Some(s) = &snap {
         let units = prefs::get().units();
         let age = backend::human_age(s.fetched_at);
@@ -978,16 +983,18 @@ pub fn rerender_current() {
             (Some(e), true) => format!("{e} · cached {age}"),
             _ => format!("Updated {age}"),
         };
-        readout_lbl.set_text(&format!(
-            "{} · {} {} · {} · {} (CC BY 4.0)",
+        readout_lbl.set_text(&state_str);
+        readout_lbl.set_tooltip_text(Some(&format!(
+            "{} · {} {} · {state_str} · {} ({})",
             s.location.name,
             units.temperature.format_with_unit(s.current.temperature_c),
             s.current.condition.label(),
-            state_str,
-            s.attribution.provider_name
-        ));
+            s.attribution.provider_name,
+            s.attribution.license_name,
+        )));
     } else if let Some(e) = &err_str {
         readout_lbl.set_text(e);
+        readout_lbl.set_tooltip_text(Some(e));
     }
 
     let snap = snap.map(|mut s| {
@@ -996,6 +1003,11 @@ pub fn rerender_current() {
     });
     let page = widgets::page(&sec_id);
     build_fn(&page, snap.as_ref(), stale, err_str.as_deref());
+    // The data's licence asks for credit wherever it's shown; this is its place now
+    // that there's no status bar.
+    if let Some(s) = &snap {
+        page.body.append(&attribution(&s.attribution));
+    }
 
     if let Some(old) = stack.child_by_name(&sec_id) {
         stack.remove(&old);
@@ -1016,6 +1028,22 @@ pub fn rerender_current() {
             }
         }
     });
+}
+
+/// "Weather data by Open-Meteo.com · CC BY 4.0", quiet at the end of a page, the
+/// provider linked to its site.
+fn attribution(a: &nyx_weather_core::ProviderAttribution) -> gtk::Label {
+    let text = glib::markup_escape_text(&a.attribution_text);
+    let markup = if a.attribution_url.is_empty() {
+        text.to_string()
+    } else {
+        format!("<a href=\"{}\">{text}</a>", glib::markup_escape_text(&a.attribution_url))
+    };
+    let label = gtk::Label::new(None);
+    label.set_markup(&format!("{markup} · {}", glib::markup_escape_text(&a.license_name)));
+    label.add_css_class("attribution");
+    label.set_halign(gtk::Align::Start);
+    label
 }
 
 pub fn overlay() -> Option<gtk::Overlay> {
@@ -1115,6 +1143,34 @@ fn show_shortcuts() {
     dialog.present();
 }
 
+/// Render the window to `out` once the forecast has had time to load, then quit.
+/// `WEATHER_SNAPSHOT_W`/`_H` set the size and `WEATHER_SNAPSHOT_DELAY` the wait (ms).
+fn snapshot_and_quit(app: &gtk::Application, out: std::path::PathBuf) {
+    let Some(window) = window() else { return };
+    window.set_opacity(0.01);
+    let env = |k: &str, d: i32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    window.set_default_size(env("WEATHER_SNAPSHOT_W", 1280), env("WEATHER_SNAPSHOT_H", 800));
+    window.present();
+    let app = app.clone();
+    let delay = env("WEATHER_SNAPSHOT_DELAY", 3000) as u64;
+    glib::timeout_add_local_once(Duration::from_millis(delay), move || {
+        if let Some(child) = window.child() {
+            let paintable = gtk::WidgetPaintable::new(Some(&child));
+            let (w, h) = (child.width(), child.height());
+            let snapshot = gtk::Snapshot::new();
+            snapshot.append_color(&gdk::RGBA::BLACK, &gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32));
+            paintable.snapshot(&snapshot, w as f64, h as f64);
+            if let (Some(node), Some(renderer)) = (snapshot.to_node(), window.renderer()) {
+                match renderer.render_texture(node, None).save_to_png(&out) {
+                    Ok(()) => println!("snapshot {w}x{h} -> {}", out.display()),
+                    Err(e) => eprintln!("snapshot failed: {e}"),
+                }
+            }
+        }
+        app.quit();
+    });
+}
+
 fn install_keys(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1146,7 +1202,6 @@ fn install_keys(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
 
         match key {
             gdk::Key::f if ctrl => {
-                s2.set_visible(true);
                 s2.grab_focus();
                 done
             }
@@ -1174,12 +1229,12 @@ fn install_keys(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
                 show_shortcuts();
                 done
             }
-            gdk::Key::Escape if s2.is_visible() => {
+            gdk::Key::Escape if s2.has_focus() || !s2.text().is_empty() => {
                 s2.set_text("");
-                s2.set_visible(false);
                 if let Some(u) = ui() {
                     u.borrow().search_results_panel.set_visible(false);
                 }
+                gtk::prelude::GtkWindowExt::set_focus(&w2, None::<&gtk::Widget>);
                 done
             }
             k if ctrl => {

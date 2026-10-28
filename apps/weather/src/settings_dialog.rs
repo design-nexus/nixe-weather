@@ -11,7 +11,7 @@ pub use nyx_ui::settings_card::{escape, fit, is_open};
 const GROUPS: &[(&str, &str, &str)] = &[
     ("Units & forecast", "weather-clear-symbolic", "Temperature, wind, refresh, API"),
     ("Locations", "mark-location-symbolic", "Saved places and active city"),
-    ("Weather window", "applications-graphics-symbolic", "Theme, glow, motion"),
+    ("Weather window", "applications-graphics-symbolic", "Theme, accent, motion"),
     ("Keyboard", "input-keyboard-symbolic", "Shortcuts"),
 ];
 

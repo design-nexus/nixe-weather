@@ -11,8 +11,17 @@ use nyx_weather_core::{
 };
 use std::f64::consts::PI;
 
-/// Every chart label is in the suite's monospace face.
-const MONO: &str = "JetBrains Mono";
+/// Chart and map labels are in the theme's interface font: the first family of
+/// its `[font] ui` list (Cairo takes one name), else the system sans.
+fn ui_font() -> String {
+    nyx_theme::look()
+        .font
+        .ui
+        .as_deref()
+        .and_then(|list| list.split(',').map(str::trim).find(|f| !f.is_empty()))
+        .unwrap_or("sans-serif")
+        .to_string()
+}
 
 fn set_rgb(cr: &cairo::Context, c: Rgb, a: f64) {
     cr.set_source_rgba(c.0, c.1, c.2, a);
@@ -130,7 +139,7 @@ pub fn line_chart(
         let digits = if span < 2.0 { 2 } else if span < 20.0 { 1 } else { 0 };
 
         // Horizontal grid lines + Y-axis labels
-        cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(10.5);
         for i in 0..=4 {
             let frac = i as f64 / 4.0;
@@ -463,7 +472,7 @@ pub fn solar_arc_canvas(
         let _ = cr.fill();
 
         // Labels for Sunrise, Solar Noon, Sunset
-        cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(10.5);
         set_rgb(cr, dim, 0.92);
         cr.move_to(pad_x + span_w * 0.20, horizon_y + 18.0);
@@ -911,7 +920,7 @@ pub fn draw_radar_map(
             ),
         };
 
-        cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+        cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Bold);
         cr.set_font_size(11.0);
         let tw = cr.text_extents(&hud_text).map(|e| e.x_advance()).unwrap_or(hud_text.len() as f64 * 6.8);
         set_rgb(cr, bg, 0.84);
@@ -928,7 +937,7 @@ pub fn draw_radar_map(
 
     // A note when the layer has nothing to show here (no radar coverage, field loading).
     if let Some(n) = notice {
-        cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(11.0);
         let tw = cr.text_extents(n).map(|e| e.x_advance()).unwrap_or(0.0);
         let (bx, by) = ((cx - tw / 2.0 - 10.0).max(8.0), h - 72.0);
@@ -947,7 +956,7 @@ pub fn draw_radar_map(
         }
         _ => "© OpenStreetMap contributors · Data: Open-Meteo",
     };
-    cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Normal);
     cr.set_font_size(9.5);
     let tw = cr.text_extents(credit).map(|e| e.x_advance()).unwrap_or(0.0);
     set_rgb(cr, bg, 0.78);
@@ -1090,7 +1099,7 @@ fn draw_temp_field(
     }
 
     let Some((plo, phi)) = f.range(|p| p.pressure_hpa) else { return };
-    cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+    cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Bold);
     cr.set_font_size(10.0);
     let mut level = (plo / 2.0).ceil() * 2.0;
     while level <= phi {
@@ -1118,7 +1127,7 @@ fn draw_temp_field(
 /// A one-line key in the map's bottom-left corner.
 fn legend(cr: &cairo::Context, label: &str, col: Rgb) {
     let p = theme::palette();
-    cr.select_font_face(MONO, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.select_font_face(&ui_font(), cairo::FontSlant::Normal, cairo::FontWeight::Normal);
     cr.set_font_size(10.5);
     let tw = cr.text_extents(label).map(|e| e.x_advance()).unwrap_or(0.0);
     let (x, y) = (12.0, cr.clip_extents().map(|e| e.3).unwrap_or(400.0) - 46.0);

@@ -56,7 +56,7 @@ pub fn build(
         &aq.us_aqi
             .map(|v| format!("{v} AQI"))
             .unwrap_or_else(|| "Unavailable".into()),
-        "mono",
+        "tnum",
     ));
 
     g_summary.add(&widgets::row(
@@ -72,7 +72,7 @@ pub fn build(
                 &aq.european_aqi
                     .map(|v| format!("{v} EAQI"))
                     .unwrap_or_else(|| "Unavailable".into()),
-                "mono",
+                "tnum",
             )
             .upcast_ref(),
         ),
@@ -188,7 +188,7 @@ pub fn build(
         g_pollutants.add(&widgets::row(
             name,
             desc,
-            Some(widgets::label(&txt, "mono").upcast_ref()),
+            Some(widgets::label(&txt, "tnum").upcast_ref()),
         ));
     }
 
@@ -213,7 +213,7 @@ pub fn build(
                 "elevated"
             };
             right.append(&widgets::tag(pollen_category(v), p_class));
-            right.append(&widgets::label(&format!("{v:.0} grains/m³"), "mono"));
+            right.append(&widgets::label(&format!("{v:.0} grains/m³"), "tnum"));
         } else {
             right.append(&widgets::label("Not forecast here", "dim"));
         }
@@ -241,9 +241,9 @@ pub fn build(
         match uv {
             Some(u) => {
                 right.append(&widgets::tag(uv_category(u), uv_tag_class(u)));
-                right.append(&widgets::label(&format!("{u:.1}"), "mono"));
+                right.append(&widgets::label(&format!("{u:.1}"), "tnum"));
             }
-            None => right.append(&widgets::label("Unavailable", "mono")),
+            None => right.append(&widgets::label("Unavailable", "tnum")),
         }
         right.upcast()
     };
