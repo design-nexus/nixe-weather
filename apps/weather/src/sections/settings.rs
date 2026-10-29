@@ -87,6 +87,12 @@ pub fn build(page: &Page) {
             window::restart_refresh_timer();
         },
     ));
+    let (row, _) = widgets::slider_row("Radar opacity", "Blend the weather overlay with the map below it.",
+        (35.0, 100.0, 5.0), p.radar_opacity_pct as f64, 0, "%", |value| {
+            prefs::update(|p| p.radar_opacity_pct = value.round().clamp(35.0, 100.0) as u8);
+            window::rerender_current();
+        });
+    g.add(&row);
     let (r, _) = widgets::switch_row(
         "US severe-weather alerts",
         "Fetch active watches and warnings from NOAA / National Weather Service for US locations.",
